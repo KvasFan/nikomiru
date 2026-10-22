@@ -304,7 +304,6 @@ fn perf_cues_appear_within_50_ms_of_their_start() {
 
 // T-POP-001, T-POP-002, T-POP-004 with real dictionaries
 // T-PERF-06
-// T-SEC-001
 #[test]
 #[ignore = "L6: needs kwin_wayland, dbus-daemon and `cargo xtask fixtures`"]
 fn a_click_on_a_subtitle_word_opens_the_dictionary_popup() {
@@ -360,6 +359,76 @@ fn a_click_on_a_subtitle_word_opens_the_dictionary_popup() {
     assert!(exit_status(&mut app, Duration::from_secs(15)).success());
 }
 
+// T-SEC-001, T-SEC-006
+#[test]
+#[ignore = "L6: needs kwin_wayland, dbus-daemon and `cargo xtask fixtures`"]
+fn a_hostile_dictionary_entry_shows_only_what_the_allowlist_lets_through() {
+    let mut desk = Desktop::start();
+    desk.import_dictionaries(&["mini-ja"]);
+    // a spy proxy: anything that fetched an address of the entry through the
+    // usual proxy variables would connect here
+    let spy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    spy.set_nonblocking(true).unwrap();
+    let proxy = format!("http://{}", spy.local_addr().unwrap());
+    for var in [
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+    ] {
+        desk.set_env(var, &proxy);
+    }
+    let (mut app, mut h) = desk.launch();
+    // 危険: a <script>, an onclick, a remote image and a javascript: link
+    h.cmd(serde_json::json!({ "cmd": "lookup", "text": "危険" }));
+    let rendered = h.wait("popup-rendered");
+    assert_eq!(
+        rendered["headwords"],
+        serde_json::json!(["危険"]),
+        "{rendered}"
+    );
+    let content = h.cmd(serde_json::json!({ "cmd": "popup_content", "level": 0 }));
+    let section = &content["entries"][0]["sections"][0];
+    assert_eq!(section["dictionary"], "Nikomiru mini-ja", "{content}");
+    assert_eq!(
+        section["glossaries"][0]["blocks"],
+        serde_json::json!([{ "k": "flow", "runs": [
+            { "k": "text", "t": "danger", "s": { "color": "#ff0000" } },
+            { "k": "link", "t": "click", "target": { "kind": "lookup", "to": "click" }, "s": {} }
+        ] }]),
+        "only the span's text and colour and the link's text survive"
+    );
+    let text = content.to_string();
+    for bad in [
+        "alert",
+        "steal",
+        "evil.example",
+        "javascript",
+        "script",
+        "url(",
+    ] {
+        assert!(!text.contains(bad), "{bad} in {text}");
+    }
+    // nothing reached for the network
+    let accepted = spy.accept();
+    assert!(
+        accepted
+            .as_ref()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::WouldBlock),
+        "the spy proxy was reached: {accepted:?}"
+    );
+    let sockets = support::internet_sockets(app.id());
+    assert!(sockets.is_empty(), "{sockets:#?}");
+    assert!(
+        !support::internet_sockets(std::process::id()).is_empty(),
+        "the check sees the spy's own socket"
+    );
+    h.quit();
+    assert!(exit_status(&mut app, Duration::from_secs(15)).success());
+}
+
 // T-DIC-001, T-DIC-032 from the page
 #[test]
 #[ignore = "L6: needs kwin_wayland, dbus-daemon and `cargo xtask fixtures`"]
@@ -410,6 +479,97 @@ fn a_dropped_dictionary_is_imported_and_used() {
         Some(0),
         "the page is read when it opens"
     );
+}
+
+/// The style of the first text run of `content` that reads `text`.
+fn style_of<'a>(content: &'a serde_json::Value, text: &str) -> Option<&'a serde_json::Value> {
+    match content {
+        serde_json::Value::Object(o) if o.get("t").and_then(|t| t.as_str()) == Some(text) => {
+            o.get("s")
+        }
+        serde_json::Value::Object(o) => o.values().find_map(|v| style_of(v, text)),
+        serde_json::Value::Array(a) => a.iter().find_map(|v| style_of(v, text)),
+        _ => None,
+    }
+}
+
+// T-DIC-035 with a real lookup
+#[test]
+#[ignore = "L6: needs kwin_wayland, dbus-daemon and `cargo xtask fixtures`"]
+fn the_users_css_saved_on_the_page_styles_the_popup() {
+    // 表 in mini-ja has a note, grey in the dictionary's styles.css
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path().join("Ep01.mkv");
+    std::fs::copy(fixture("av_basic.mkv"), &video).unwrap();
+    std::fs::write(
+        dir.path().join("Ep01.ja.srt"),
+        "1\n00:00:00,500 --> 00:00:09,500\n表\n",
+    )
+    .unwrap();
+    let mut desk = Desktop::start();
+    desk.import_dictionaries(&["mini-ja"]);
+    // paused on the cue, so that it stays
+    let open = |desk: &mut Desktop| {
+        let (app, mut h) = desk.launch();
+        h.open(&video.to_string_lossy());
+        h.wait("file-loaded");
+        h.state_until("the cue", |s| visible_text(s) == ["表"]);
+        h.key("Space");
+        h.state_until("paused", |s| s["paused"] == true);
+        (app, h)
+    };
+    let (mut app, mut h) = open(&mut desk);
+    let note = |h: &mut support::Harness| {
+        h.cmd(serde_json::json!({ "cmd": "click_grapheme", "layer": "main", "cue_index": 0, "grapheme_index": 0 }));
+        h.wait("popup-rendered");
+        let content = h.cmd(serde_json::json!({ "cmd": "popup_content", "level": 0 }));
+        let style = style_of(&content, "a table").cloned();
+        h.key("Escape");
+        h.state_until("the popup closed", |s| {
+            s["popups"].as_array().is_some_and(Vec::is_empty)
+        });
+        style.unwrap_or_else(|| panic!("no note in {content}"))
+    };
+    let style = note(&mut h);
+    assert_eq!(style["color"], "#808080", "{style}");
+    assert_eq!(style["italic"], true, "{style}");
+
+    // the page, opened by a drop of the installed zip (refused as the same
+    // revision); then its editor's Save
+    h.drop_files(&[&fixture("dicts/mini-ja.zip")]);
+    let s = h.state_until("the page's list", |s| {
+        s["dictionaries"]["rows"]
+            .as_array()
+            .is_some_and(|r| !r.is_empty())
+    });
+    let id = s["dictionaries"]["rows"][0]["id"].clone();
+    let css = r#"span[data-sc-class="note"] { color: #ff0000; position: fixed }"#;
+    h.cmd(serde_json::json!({ "cmd": "dict_css", "id": id, "css": css }));
+    let s = h.state();
+    assert_eq!(s["dictionaries"]["rows"][0]["userCss"], css, "{s}");
+    assert!(
+        s["toast"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Nikomiru mini-ja"),
+        "{s}"
+    );
+    // Esc closes the page, which covers the popups
+    h.key("Escape");
+
+    // the user's rule comes after the dictionary's and wins; the rest of the
+    // style stays, and what the subset refuses does nothing
+    let style = note(&mut h);
+    assert_eq!(style["color"], "#ff0000", "{style}");
+    assert_eq!(style["italic"], true, "{style}");
+    h.quit();
+    assert!(exit_status(&mut app, Duration::from_secs(15)).success());
+
+    // kept for the next start
+    let (mut app, mut h) = open(&mut desk);
+    assert_eq!(note(&mut h)["color"], "#ff0000");
+    h.quit();
+    assert!(exit_status(&mut app, Duration::from_secs(15)).success());
 }
 
 // T-POP-014, T-POP-015
@@ -497,4 +657,45 @@ fn files_dragged_from_another_client_open_and_import() {
     h.wait("dictionary-imported");
     h.quit();
     assert!(exit_status(&mut app, Duration::from_secs(15)).success());
+}
+
+// T-REL-001, T-DIC-010: quitting during an import cancels it; the library is
+// closed, nothing is registered and nothing is left to repair or clean up
+#[test]
+#[ignore = "L6: needs kwin_wayland, dbus-daemon and `cargo xtask fixtures`"]
+fn quitting_during_an_import_leaves_nothing_behind() {
+    let mut desk = Desktop::start();
+    let zip = desk.large_dictionary(300_000);
+    let (mut app, mut h) = desk.launch();
+    h.drop_files(&[&zip]);
+    h.state_until("the import running", |s| {
+        s["dictionaries"]["import"]["state"] == "running"
+            && s["dictionaries"]["import"]["done"].as_u64().unwrap_or(0) > 0
+    });
+    let quitting = std::time::Instant::now();
+    h.quit();
+    assert!(exit_status(&mut app, Duration::from_secs(15)).success());
+    let took = quitting.elapsed();
+    eprintln!("quit during the import: {took:?}");
+    assert!(took < Duration::from_secs(5), "the exit waited {took:?}");
+    assert!(
+        !desk.data_file("library.redb.bak-repair").exists(),
+        "the library was left open"
+    );
+    // the next start: still nothing to repair, nothing registered, no
+    // staging folder left
+    let (mut app, mut h) = desk.launch();
+    h.state();
+    h.quit();
+    assert!(exit_status(&mut app, Duration::from_secs(15)).success());
+    assert!(!desk.data_file("library.redb.bak-repair").exists());
+    assert!(
+        desk.registered_dictionaries().is_empty(),
+        "{:?}",
+        desk.registered_dictionaries()
+    );
+    let left: Vec<_> = std::fs::read_dir(desk.data_file("dicts"))
+        .map(|d| d.filter_map(Result::ok).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
 }

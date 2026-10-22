@@ -52,5 +52,7 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# the L6 tests write a large dictionary for an import to interrupt
+zip.workspace = true
 wayland-protocols-wlr.workspace = true
 wayland-protocols-plasma.workspace = true

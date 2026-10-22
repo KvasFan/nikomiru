@@ -29,8 +29,9 @@ struct Env {
 }
 
 impl Env {
-    /// The dictionary with this id of the file, imported on first use.
-    fn dictionary(&mut self, id: &str) -> Dictionary {
+    /// The dictionary with this id of the file, imported on first use; an
+    /// import that fails fails the case.
+    fn dictionary(&mut self, id: &str) -> Result<Dictionary, String> {
         if !self.imported.contains_key(id) {
             let source = &self.sources[id];
             let zip_path = self.tmp.path().join(format!("{id}.zip"));
@@ -56,18 +57,18 @@ impl Env {
                 &Cancel::new(),
                 |_| {},
             )
-            .unwrap_or_else(|e| panic!("{id}: {e}"));
+            .map_err(|e| format!("importing {id}: {e}"))?;
             let store = RedbStore::open(&imported.dir.join("dict.redb")).unwrap();
             let info = store.info().clone();
             self.imported
                 .insert(id.to_string(), (Arc::new(store), info));
         }
         let (store, info) = &self.imported[id];
-        Dictionary {
+        Ok(Dictionary {
             id: id.to_string(),
             name: info.index.title.clone(),
             store: Arc::clone(store) as Arc<dyn DictStore>,
-        }
+        })
     }
 }
 
@@ -226,6 +227,12 @@ fn check_counts(env: &Env, expected: &Value) -> Result<(), String> {
             return Err(format!("import counts of {id}: {got} instead of {want}"));
         }
     }
+    for (id, want) in expected["import_titles"].as_object().into_iter().flatten() {
+        let got = &env.imported[id].1.index.title;
+        if want.as_str() != Some(got.as_str()) {
+            return Err(format!("title of {id}: {got:?} instead of {want}"));
+        }
+    }
     Ok(())
 }
 
@@ -234,6 +241,8 @@ fn lookup_case(env: &mut Env, case: &Value) -> Result<(), String> {
     let dicts: Vec<Dictionary> = strings(&case["dictionaries"])
         .iter()
         .map(|id| env.dictionary(id))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|d| !disabled.contains(&d.id))
         .collect();
     let lookup = Lookup::new(dicts, case["language"].as_str().unwrap());
@@ -260,7 +269,7 @@ fn kanji_case(env: &mut Env, case: &Value) -> Result<(), String> {
     let dicts: Vec<Dictionary> = strings(&case["dictionaries"])
         .iter()
         .map(|id| env.dictionary(id))
-        .collect();
+        .collect::<Result<_, _>>()?;
     let lookup = Lookup::new(dicts, "ja");
     let found = lookup
         .kanji(case["query"].as_str().unwrap())
@@ -467,7 +476,7 @@ fn fushi_lookup_vectors() {
         imported: HashMap::new(),
     };
     let mut failures = Vec::new();
-    let mut run = 0;
+    let (mut run, mut known) = (0, 0);
     for case in doc["cases"].as_array().unwrap() {
         if case["skip"] == Value::Bool(true) {
             continue;
@@ -481,16 +490,27 @@ fn fushi_lookup_vectors() {
             "pitch" => pitch_case(case),
             kind => Err(format!("unknown kind {kind}")),
         };
-        if let Err(e) = result {
-            failures.push(format!(
-                "{} ({} › {}): {e}",
-                case["id"].as_str().unwrap(),
-                case["provenance"]["file"].as_str().unwrap_or("?"),
-                case["provenance"]["test"].as_str().unwrap_or("?"),
-            ));
+        let label = format!(
+            "{} ({} › {})",
+            case["id"].as_str().unwrap(),
+            case["provenance"]["file"].as_str().unwrap_or("?"),
+            case["provenance"]["test"].as_str().unwrap_or("?"),
+        );
+        // a known failure must keep failing until its mark is removed
+        match (result, case["known_failure"].is_object()) {
+            (Ok(()), false) => {}
+            (Err(e), false) => failures.push(format!("{label}: {e}")),
+            (Err(e), true) => {
+                known += 1;
+                eprintln!("known failure {label}: {e}");
+            }
+            (Ok(()), true) => {
+                failures.push(format!("{label}: passes now, remove its known_failure"))
+            }
         }
     }
-    assert!(run >= 230, "only {run} cases ran");
+    eprintln!("{run} lookup cases, {known} known failures");
+    assert!(run >= 240, "only {run} cases ran");
     assert!(
         failures.is_empty(),
         "{} of {run} cases fail:\n{}",

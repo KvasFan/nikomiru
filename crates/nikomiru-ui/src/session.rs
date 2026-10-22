@@ -288,6 +288,10 @@ impl Session {
             ..ViewState::default()
         };
         let services_obscure = services.config.subtitles.obscure.clone();
+        let popup_size = (
+            services.config.popup.max_width,
+            services.config.popup.max_height,
+        );
         let writer = services
             .library
             .as_ref()
@@ -316,7 +320,7 @@ impl Session {
             sub_loads: Vec::new(),
             sub_auto_done: false,
             sub_list_version: 0,
-            popups: Popups::default(),
+            popups: Popups::new(popup_size),
             lookups: Vec::new(),
             dict_page: DictionaryPage::default(),
             dict_imports: Vec::new(),
@@ -1178,6 +1182,22 @@ impl Session {
         }
     }
 
+    /// Looks `text` up in a root popup, as a click on a subtitle word does but
+    /// with no cue behind it: the GUI test harness's `lookup` (TEST §2.1).
+    #[cfg(feature = "test-harness")]
+    pub fn look_up_text(&mut self, text: &str) {
+        let query = nikomiru_text::scan::normalize(text);
+        if query.is_empty() {
+            return;
+        }
+        self.hover.reset();
+        let playing = self.view.loaded && !self.view.paused;
+        let commands =
+            self.popups
+                .open_from_subtitle(playing, query, Origin::Glossary, Rect::default());
+        self.run_popup_commands(commands);
+    }
+
     fn run_popup_commands(&mut self, commands: Vec<Command>) {
         for c in commands {
             match c {
@@ -1223,6 +1243,13 @@ impl Session {
         }
         let commands = self.popups.open_nested(level, query, anchor);
         self.run_popup_commands(commands);
+    }
+
+    /// A popup's border was dragged to `width` × `height` (POP-006): the next
+    /// popups take that size until the app closes. `config.toml` keeps the
+    /// configured one: the app does not write it yet.
+    pub fn popup_resized(&mut self, width: f64, height: f64) {
+        self.popups.set_size((width, height));
     }
 
     /// A click inside popup `level`: the popups above it close.
@@ -1365,11 +1392,19 @@ impl Session {
         self.dict_effects(effects);
     }
 
-    /// Moves a dictionary up or down (DIC-031).
+    /// Moves a dictionary up or down in its group (DIC-031).
     pub fn dict_move(&mut self, id: &str, delta: i32) {
         let effects = self
             .dict_page
             .move_by(self.services.dictionaries.as_ref(), id, delta);
+        self.dict_effects(effects);
+    }
+
+    /// Moves a dictionary to a gap of its group, where it was dropped (DIC-031).
+    pub fn dict_move_to(&mut self, id: &str, to: usize) {
+        let effects = self
+            .dict_page
+            .move_to(self.services.dictionaries.as_ref(), id, to);
         self.dict_effects(effects);
     }
 
@@ -1402,6 +1437,14 @@ impl Session {
         let effects = self
             .dict_page
             .set_collapse(self.services.dictionaries.as_ref(), id, state);
+        self.dict_effects(effects);
+    }
+
+    /// Saves the user's CSS of a dictionary (DIC-035).
+    pub fn dict_set_user_css(&mut self, id: &str, css: &str) {
+        let effects = self
+            .dict_page
+            .set_user_css(self.services.dictionaries.as_ref(), id, css);
         self.dict_effects(effects);
     }
 

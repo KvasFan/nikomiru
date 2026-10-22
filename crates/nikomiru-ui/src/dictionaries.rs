@@ -1,18 +1,88 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The dictionaries page apart from its drawing (DIC-016, DIC-030…DIC-034): the list of
-//! registered dictionaries and the import of a zip, with the update offer
-//! for a new revision, its progress and its cancellation. The work is done
-//! by a [`DictionaryService`] of the application.
+//! The dictionaries page apart from its drawing (DIC-016, DIC-030…DIC-035): the list of
+//! registered dictionaries by type and their order, and the import of a zip,
+//! with the update offer for a new revision, its progress and its
+//! cancellation. The work is done by a [`DictionaryService`] of the
+//! application.
 
 use std::path::{Path, PathBuf};
 
 use nikomiru_core::Cancel;
 use nikomiru_dict::import::Progress;
+use nikomiru_dict::yomitan::Kinds;
 use nikomiru_library::{Check, Collapse, DictionaryRecord};
 use serde_json::{Value, json};
 
 use crate::popup::Reply;
+
+/// The types the page lists the dictionaries by (DIC-030), in its order.
+///
+/// A dictionary can have several types (a term dictionary with a frequency
+/// bank gives frequencies too), and the order is one for all of them. Its row,
+/// with its controls, is under its main type: the first it has, in DIC-015's
+/// order, which is how Fushi files a dictionary under one type. Under its
+/// other types a reference row marks its place in that ranking, so that each
+/// group shows every dictionary its ranking takes in: a frequency dictionary
+/// can be dragged above the frequencies of a term dictionary. Full rows under
+/// every type would make one drag reorder two groups, and could ask for orders
+/// that contradict each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    /// Term dictionaries: their glossaries, in this order, make the popup.
+    Terms,
+    /// Kanji dictionaries.
+    Kanji,
+    /// Frequencies: the first ones decide the sorting (LKP-034).
+    Frequency,
+    /// Pitch accents.
+    Pitch,
+}
+
+impl Group {
+    /// Every type, in the page's order.
+    pub const ALL: [Group; 4] = [Group::Terms, Group::Kanji, Group::Frequency, Group::Pitch];
+
+    /// Whether a dictionary with `kinds` has this type.
+    pub fn has(self, kinds: &Kinds) -> bool {
+        match self {
+            Group::Terms => kinds.terms,
+            Group::Kanji => kinds.kanji,
+            Group::Frequency => kinds.frequency,
+            Group::Pitch => kinds.pitch,
+        }
+    }
+
+    /// The type a dictionary's row is under. One with none (nothing a lookup
+    /// uses) is with the term dictionaries, where it can still be deleted.
+    pub fn main(kinds: &Kinds) -> Group {
+        Group::ALL
+            .into_iter()
+            .find(|g| g.has(kinds))
+            .unwrap_or(Group::Terms)
+    }
+
+    /// Its name for the harness and the strings (`dict-group-<name>`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Group::Terms => "terms",
+            Group::Kanji => "kanji",
+            Group::Frequency => "frequency",
+            Group::Pitch => "pitch",
+        }
+    }
+}
+
+/// A row of a group.
+#[derive(Debug, Clone, Copy)]
+pub struct Member<'a> {
+    /// The dictionary.
+    pub id: &'a str,
+    /// Its record.
+    pub record: &'a DictionaryRecord,
+    /// Its row is under another type: this one only marks its place.
+    pub reference: bool,
+}
 
 /// A finished lookup or import; may run on any thread.
 pub type Done<T> = Box<dyn FnOnce(Result<T, String>) + Send>;
@@ -45,6 +115,8 @@ pub trait DictionaryService: Send {
     fn rename(&self, id: &str, name: Option<String>) -> Result<(), String>;
     /// Sets the popup state of a dictionary's block (DIC-034).
     fn set_collapse(&self, id: &str, collapse: Collapse) -> Result<(), String>;
+    /// Sets the user's CSS of a dictionary; empty clears it (DIC-035).
+    fn set_user_css(&self, id: &str, css: &str) -> Result<(), String>;
 }
 
 /// Where the import of a zip is.
@@ -267,24 +339,89 @@ impl DictionaryPage {
         effects
     }
 
-    /// Moves a dictionary up (`-1`) or down (`+1`) in the order.
+    /// The rows of `group`, in the order: every dictionary of this type, those
+    /// whose row is under another type as references (DIC-030).
+    pub fn group(&self, group: Group) -> Vec<Member<'_>> {
+        self.rows
+            .iter()
+            .filter_map(|(id, r)| {
+                let main = Group::main(&r.kinds);
+                (main == group || group.has(&r.kinds)).then_some(Member {
+                    id,
+                    record: r,
+                    reference: main != group,
+                })
+            })
+            .collect()
+    }
+
+    /// Moves a dictionary over the row above (`-1`) or below (`+1`) in its
+    /// group, references included: the keyboard's and the screen reader's way
+    /// to do what a drag does (DIC-031).
     pub fn move_by(
         &mut self,
         service: &dyn DictionaryService,
         id: &str,
         delta: i32,
     ) -> Vec<Effect> {
-        let Some(at) = self.rows.iter().position(|(i, _)| i == id) else {
+        let Some((_, r)) = self.rows.iter().find(|(i, _)| i == id) else {
             return Vec::new();
         };
-        let to = (at as i64 + i64::from(delta)).clamp(0, self.rows.len() as i64 - 1) as usize;
-        if to == at {
+        let rows = self.group(Group::main(&r.kinds));
+        let Some(at) = rows.iter().position(|m| m.id == id) else {
             return Vec::new();
+        };
+        let to = if delta < 0 {
+            at.checked_sub(1)
+        } else {
+            (at + 1 < rows.len()).then_some(at + 2)
+        };
+        match to {
+            Some(to) => self.move_to(service, id, to),
+            None => Vec::new(),
         }
-        let mut ids: Vec<String> = self.rows.iter().map(|(i, _)| i.clone()).collect();
-        let moved = ids.remove(at);
-        ids.insert(to, moved);
-        self.after(service, service.reorder(&ids))
+    }
+
+    /// Moves a dictionary to the gap `to` of its group, as a drop does
+    /// (DIC-031): 0 is above the group's first row, its length below the last.
+    /// In the one order the dictionary goes just above the row under the gap,
+    /// or just below the group's last row; every other dictionary keeps its
+    /// place, so no other group changes but for the references to this one.
+    pub fn move_to(&mut self, service: &dyn DictionaryService, id: &str, to: usize) -> Vec<Effect> {
+        match self.moved(id, to) {
+            Some(ids) => {
+                let r = service.reorder(&ids);
+                self.after(service, r)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// The order after [`DictionaryPage::move_to`]; `None` if nothing moves.
+    fn moved(&self, id: &str, to: usize) -> Option<Vec<String>> {
+        let (_, r) = self.rows.iter().find(|(i, _)| i == id)?;
+        let rows: Vec<&str> = self
+            .group(Group::main(&r.kinds))
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        let at = rows.iter().position(|m| *m == id)?;
+        let to = to.min(rows.len());
+        if to == at || to == at + 1 {
+            return None;
+        }
+        let mut ids: Vec<String> = self
+            .rows
+            .iter()
+            .map(|(i, _)| i.clone())
+            .filter(|i| i != id)
+            .collect();
+        let place = match rows.get(to) {
+            Some(below) => ids.iter().position(|i| i == below)?,
+            None => ids.iter().position(|i| Some(&i.as_str()) == rows.last())? + 1,
+        };
+        ids.insert(place, id.to_string());
+        Some(ids)
     }
 
     fn after(
@@ -339,6 +476,23 @@ impl DictionaryPage {
         self.after(service, r)
     }
 
+    /// Saves the user's CSS of a dictionary (DIC-035).
+    pub fn set_user_css(
+        &mut self,
+        service: &dyn DictionaryService,
+        id: &str,
+        css: &str,
+    ) -> Vec<Effect> {
+        let r = service.set_user_css(id, css);
+        let saved = r.is_ok();
+        let mut effects = self.after(service, r);
+        if saved {
+            let title = self.title_of(id);
+            effects.push(Effect::Message("dict-css-saved", vec![("title", title)]));
+        }
+        effects
+    }
+
     /// The page as JSON, for the test harness's `state`.
     pub fn json(&self) -> Value {
         let rows: Vec<Value> = self
@@ -364,6 +518,7 @@ impl DictionaryPage {
                     "revision": r.revision,
                     "enabled": r.enabled,
                     "types": types,
+                    "group": Group::main(&r.kinds).name(),
                     "terms": r.counts.terms,
                     "kanji": r.counts.kanji,
                     "frequencies": r.counts.frequencies + r.counts.kanji_meta,
@@ -375,6 +530,8 @@ impl DictionaryPage {
                         Collapse::Expanded => "expanded",
                         Collapse::Collapsed => "collapsed",
                     },
+                    "language": r.language,
+                    "userCss": r.user_css,
                 })
             })
             .collect();
@@ -499,6 +656,15 @@ mod tests {
         fn set_collapse(&self, _id: &str, _collapse: Collapse) -> Result<(), String> {
             Err("read-only".into())
         }
+        fn set_user_css(&self, id: &str, css: &str) -> Result<(), String> {
+            let mut rows = self.rows.lock().unwrap();
+            let (_, r) = rows
+                .iter_mut()
+                .find(|(i, _)| i == id)
+                .ok_or_else(|| "no such dictionary".to_string())?;
+            r.user_css = css.to_string();
+            Ok(())
+        }
     }
 
     fn fake() -> Fake {
@@ -622,5 +788,111 @@ mod tests {
         page.delete(&f, "b");
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.json()["rows"][0]["types"], json!(["terms"]));
+    }
+
+    fn order(page: &DictionaryPage) -> Vec<&str> {
+        page.rows.iter().map(|(i, _)| i.as_str()).collect()
+    }
+
+    /// A group's rows, references in brackets.
+    fn rows_of(page: &DictionaryPage, group: Group) -> Vec<String> {
+        page.group(group)
+            .iter()
+            .map(|m| {
+                if m.reference {
+                    format!("({})", m.id)
+                } else {
+                    m.id.to_string()
+                }
+            })
+            .collect()
+    }
+
+    // T-DIC-030, T-DIC-031
+    #[test]
+    fn rows_go_under_their_main_type_and_move_within_it() {
+        let kinds = |terms, kanji, frequency, pitch| Kinds {
+            terms,
+            kanji,
+            frequency,
+            pitch,
+        };
+        let of = |title: &str, kinds: Kinds| DictionaryRecord {
+            kinds,
+            ..record(title, "1")
+        };
+        let f = fake();
+        *f.rows.lock().unwrap() = vec![
+            ("a".into(), of("A", kinds(true, false, false, false))),
+            ("f".into(), of("F", kinds(false, false, true, false))),
+            ("b".into(), of("B", kinds(true, false, true, false))),
+            ("p".into(), of("P", kinds(false, false, false, true))),
+            ("c".into(), of("C", kinds(true, false, false, false))),
+            ("k".into(), of("K", kinds(false, true, true, false))),
+            ("x".into(), of("X", Kinds::default())),
+        ];
+        let mut page = DictionaryPage::default();
+        page.refresh(&f);
+        assert_eq!(rows_of(&page, Group::Terms), ["a", "b", "c", "x"]);
+        assert_eq!(rows_of(&page, Group::Kanji), ["k"]);
+        assert_eq!(rows_of(&page, Group::Frequency), ["f", "(b)", "(k)"]);
+        assert_eq!(rows_of(&page, Group::Pitch), ["p"]);
+        assert_eq!(page.json()["rows"][2]["group"], "terms");
+        assert_eq!(page.json()["rows"][5]["group"], "kanji");
+
+        // above the group's first row: just above it in the order, and
+        // nothing else moves
+        page.move_to(&f, "c", 0);
+        assert_eq!(order(&page), ["c", "a", "f", "b", "p", "k", "x"]);
+        // below the group's last row: just below it; a frequency dictionary
+        // goes after the frequencies of a term dictionary
+        page.move_to(&f, "f", 3);
+        assert_eq!(order(&page), ["c", "a", "b", "p", "k", "f", "x"]);
+        assert_eq!(rows_of(&page, Group::Frequency), ["(b)", "(k)", "f"]);
+        assert_eq!(rows_of(&page, Group::Terms), ["c", "a", "b", "x"]);
+        // onto itself, or into the gaps around it: nothing
+        assert!(page.move_to(&f, "f", 2).is_empty());
+        assert!(page.move_to(&f, "f", 3).is_empty());
+        assert_eq!(order(&page), ["c", "a", "b", "p", "k", "f", "x"]);
+
+        // ▲ and ▼ step over the rows of the group, references included
+        page.move_by(&f, "f", -1);
+        assert_eq!(rows_of(&page, Group::Frequency), ["(b)", "f", "(k)"]);
+        page.move_by(&f, "b", 1);
+        assert_eq!(rows_of(&page, Group::Terms), ["c", "a", "x", "b"]);
+        assert_eq!(
+            rows_of(&page, Group::Frequency),
+            ["f", "(k)", "(b)"],
+            "its references follow it"
+        );
+        assert!(page.move_by(&f, "c", -1).is_empty(), "first of its group");
+        assert!(page.move_by(&f, "b", 1).is_empty(), "last of its group");
+        assert!(page.move_by(&f, "p", 1).is_empty(), "alone in its group");
+        assert!(page.move_to(&f, "gone", 0).is_empty());
+    }
+
+    // T-DIC-035
+    #[test]
+    fn the_users_css_is_saved_and_the_page_reads_it_back() {
+        let f = fake();
+        let mut page = DictionaryPage::default();
+        page.refresh(&f);
+        let version = page.version;
+        let css = "span { color: red }";
+        assert_eq!(
+            page.set_user_css(&f, "b", css),
+            [Effect::Message(
+                "dict-css-saved",
+                vec![("title", "Freq".into())]
+            )]
+        );
+        assert!(page.version > version, "the page is drawn again");
+        assert_eq!(page.json()["rows"][1]["userCss"], css);
+        assert_eq!(page.rows[1].1.user_css, css);
+        // a failure is said, and nothing is claimed saved
+        assert_eq!(
+            page.set_user_css(&f, "gone", css),
+            [Effect::Error("no such dictionary".into())]
+        );
     }
 }

@@ -39,7 +39,9 @@
 - Commands:
   - `open {path}`, `wait {event, timeout_ms}`, `key {code, mods}` (`code` is a W3C key name such as `Space`, `mods` a list of `Ctrl`, `Shift`, `Alt`; the key goes through the window's key handler, as a real one does), `drop {paths}` (paths; the first goes through the window's drop handler);
   - `click_grapheme {layer, cue_index, grapheme_index}` (through the overlay's click command, with the popup's fallback place), `popup_button {replay | goto}`;
+  - `lookup {text}`: a root popup for `text`, opened as a click on a subtitle word opens one but with no cue behind it (fallback place); `popup_content {level}`: the view model of that popup as JSON (POP-009), `null` while it looks up;
   - `state {}`: player state, open popups, visible cues, toasts, dictionaries page;
+  - `dict_css {id, css}`: a dictionary's CSS saved through the command of its editor's Save button;
   - `mpv_get {property}`: read-only, for metrics; read on the harness thread, never on the UI thread, which renders the video;
   - `quit {}`;
   - planned: `hover_grapheme {…}`, `click {selector}` (through the AccessKit tree).
@@ -124,7 +126,8 @@ Variable `NIKOMIRU_REALDATA=/path`, with files provided by the user: `jmdict_eng
 | Mixed orthography, Kansai | `native/fushidicts/tests/ja_mixed_orthography_lookup_test.cpp`, `ja_kansai_ta_boundary_test.cpp` | T-LKP-031, T-LKP-033 |
 | Frequencies and pitch accent | `native/fushidicts/tests/freq_pitch_import_query_test.cpp`, `freq_pitch_merge_query_test.cpp`, `lookup_freq_pitch_enrichment_test.cpp`, `ipa_import_query_test.cpp` | T-LKP-035, T-LKP-040…043 |
 | Korean (future) | `native/fushidicts/tests/korean_hangul_lookup_test.cpp` | T-LKP-012 |
-| Import robustness | `native/fushidicts/tests/import_failure_boundary_test.cpp`, `import_memory_bound_test.cpp`, `hash_truncated_table_guard_test.cpp` | T-DIC-011…014 |
+| Import robustness | `native/fushidicts/tests/import_failure_boundary_test.cpp`, `import_memory_bound_test.cpp`, `hash_truncated_table_guard_test.cpp`, the `zip_*` tests, `media_import_query_test.cpp`, `simple_dict_css_test.cpp` (§5.3) | T-DIC-001, T-DIC-011…015 |
+| Kanji, formats, titles | `native/fushidicts/tests/kanji_import_query_test.cpp`, `format_v2_upstream_sync_test.cpp`, `dict_name_uaf_e2e_test.cpp`, `yomitan_redirect_lookup_test.cpp` | T-LKP-032, T-LKP-034, T-LKP-037, T-DIC-003 |
 | Sentence extraction | `fushi/test/lookup/sentence_extraction_test.dart` | T-TXT-007 |
 | Character count | `fushi/test/stats/study_char_count_test.dart`, `study_char_count_parity_test.dart` | T-STA-003 |
 | Interval coverage | `fushi/test/stats/interval_coverage_test.dart` | T-STA-001 |
@@ -140,6 +143,56 @@ Variable `NIKOMIRU_REALDATA=/path`, with files provided by the user: `jmdict_eng
 2. One Rust test per area reads the JSON and runs all the cases. A failing case shows its `provenance` in the message.
 3. Cases that depend on **intentionally different** behaviors (SPECIFICATION §6.6.8) have `"divergence": "<requirement ID>"` and an updated expected output.
 4. The dictionaries of Fushi's C++ tests are built in code: they are rewritten as Yomitan dictionaries in the `dictionaries` section of `tests/conformance/lookup.json`, which the runner zips and imports like any other dictionary.
+5. The import-robustness cases (`tests/conformance/import.json`, run by `crates/nikomiru-dict/tests/conformance_import.rs`) describe their zip entry by entry: raw names, extra fields, ZIP64 sentinels, broken deflate streams, lying sizes. The runner writes the zip field by field, imports it and checks the error, or the title, types, counts, styles, media and terms; a damaged dictionary file must open or fail without a panic or a hang.
+6. A case that fails because of a bug in a file that another work track owns gets `"known_failure": {"owner", "note"}`: the runner expects it to fail and fails as soon as it passes, so the mark goes with the fix. The open ones are listed in §5.3.
+7. A Fushi case that cannot be expressed (source scans, internal APIs, Fushi's storage files, MDX) stays in the file with `"skip": true` and a note saying why, or where it went.
+
+### 5.3 Coverage of fushidicts
+
+Every test file of `native/fushidicts/tests` at `ac8034e`, and the Dart tests of §5.1 for the M3 areas. The prefixes are the case ids in the conformance files; skipped cases are counted apart.
+
+| Fushi file | Nikomiru test, or why it does not apply |
+|---|---|
+| `word_scan_test.cpp` | `text.json` `scan-*` (9) |
+| `text_processor_test.cpp` | `text.json` `tp-*` (35) |
+| `korean_hangul_lookup_test.cpp` | `text.json` `ko-*` (46, 2 skipped: their lookups are the next ones), `lookup.json` `khl-*` (2) |
+| `en_apostrophe_lookup_test.cpp` | `lookup.json` `eal-*` (6, 1 skipped: an asset guard) |
+| `en_inflection_lookup_test.cpp` | `lookup.json` `eil-*` (43, 6 skipped: Fushi's `term_rules.flag` file) |
+| `simple_dict_deinflection_test.cpp` | `lookup.json` `sdd-*` (8) |
+| `popup_json_deinflection_test.cpp` | `lookup.json` `pjd-*` (4, 1 skipped: an engine state no lookup produces) |
+| `popup_json_reading_merge_test.cpp` | `lookup.json` `prm-*` (2, 2 skipped: the MDX empty-reading merge) |
+| `ja_mixed_orthography_lookup_test.cpp` | `lookup.json` `jmo-*` (10) |
+| `ja_kansai_ta_boundary_test.cpp` | `lookup.json` `jkb-*` (25) |
+| `yomitan_redirect_lookup_test.cpp` | `lookup.json` `yrl-*` (8) |
+| `freq_pitch_import_query_test.cpp` | `lookup.json` `fpi-*` (1) |
+| `freq_pitch_merge_query_test.cpp` | `lookup.json` `fpm-*` (3, 2 skipped: one dictionary registered in one role only) |
+| `lookup_freq_pitch_enrichment_test.cpp` | `lookup.json` `lfe-*` (6) |
+| `ipa_import_query_test.cpp` | `lookup.json` `iiq-*` (1) |
+| `pitch_duplicate_notation_test.cpp` | `lookup.json` `pdn-*` (2) |
+| `kanji_import_query_test.cpp` | `lookup.json` `kiq-*` (4) |
+| `format_v2_upstream_sync_test.cpp` | `lookup.json` `fv2-*` (7: kanji stats, glossary round trip, pitch pattern, score, frequency order, the last a divergence (DIC-003); 4 skipped: the completion marker, the separate Bloom file, `primary_reading` and the frequency options) |
+| `dict_name_uaf_e2e_test.cpp` | `lookup.json` `dnu-titles` |
+| `dict_name_lifetime_test.cpp` | Not self-contained (a dictionary folder on its command line); `dict_name_uaf_e2e_test.cpp` is its successor |
+| `import_failure_boundary_test.cpp` | `lookup.json` `ifb-kanji-malformed-*` (2), `import.json` `ifb-invalid-utf8-title`, `import_l4.rs` `an_import_that_cannot_write_fails_and_leaves_nothing` (the write limit, in a child process); the memory mapping, errno and MDX cases do not apply (skipped) |
+| `import_memory_bound_test.cpp` | `import.json` `imb-*` (4: members byte for byte, a corrupt member, banks and media; the low-RAM mode does not exist); C is MDict (skipped) |
+| `hash_truncated_table_guard_test.cpp` | `import.json` `htg-*` (4): the damaged file is the redb dictionary file |
+| `media_import_query_test.cpp` | `import.json` `miq-media` |
+| `zip64_central_dir_test.cpp` | `import.json` `z64-*` (2) |
+| `zip_high_ratio_bank_test.cpp` | `import.json` `zhr-*` (5; 3 divergences, DIC-011: the 200:1 ratio limit and the 512 MiB cap) |
+| `zip_malformed_deflate_test.cpp` | `import.json` `zmd-*` (4) |
+| `zip_unicode_path_extra_test.cpp` | `import.json` `zup-*` (8; 4 known failures) |
+| `zip_wrapper_directory_test.cpp` | `import.json` `zwd-*` (8) |
+| `simple_dict_css_test.cpp` | `import.json` `sdc-styles`: the Yomitan counterpart, `styles.css` kept byte for byte; the `.css` next to an MDX file does not apply |
+| `win_utf8_import_test.cpp` | `import.json` `wui-non-ascii-paths`: non-ASCII zip, folder and title (the Windows ANSI path bug itself does not apply) |
+| `ffi_guard_coverage_test.cpp`, `decompressor_null_guard_test.cpp` | Do not apply: source scans of Fushi's C ABI and of its libdeflate calls; Nikomiru has no C ABI and inflates with `flate2` |
+| `import_breadcrumb_test.cpp` | Does not apply: Fushi's crash breadcrumb file; a crashed import leaves its `.importing` folder, removed at the next start (DIC-013, T-DIC-013) |
+| `mdd_*_test.cpp`, `mdx_*_test.cpp` (8 files) | Out of scope: MDict (DIC-004, post-1.0) |
+| `fushi/test/lookup/apostrophe_word_scan_bug2056_test.dart` | `text.json` `q2056-*` (62, 2 skipped: source guards) |
+| `fushi/test/lookup/reader_cue_gap_word_scan_bug3453_test.dart` | `text.json` `q3453-*`, `sent-3453-*` (7, 1 skipped: the reader's drag selection) |
+| `fushi/test/dictionary/deinflection_grammar_tags_test.dart` | `lookup.json` `dgt-*` (5, 7 skipped: Fushi's stored extras, its second result builder, an engine state no lookup produces, source guards) |
+| `fushi/test/lookup/sentence_extraction_test.dart` | `text.json` `sent-*` (9, 2 skipped: a negative click offset and a source guard) |
+
+Known failures, owner `crates/nikomiru-dict/src/import.rs`: `zup-bit11`, `zup-unknown-version`, `zup-overrun`, `zup-empty-name` (the importer takes the `zip` crate's Unicode Path handling, which applies the field with bit 11 set or with any version, refuses an archive whose field overruns its block and takes an empty name).
 
 ---
 
@@ -218,16 +271,19 @@ Format: **ID** · what is checked · data and expected result · level. Each sec
 | T-DIC-001 | Import of `mini-ja` | The counts of terms, meta, kanji, tags and media match the source; `styles.css` preserved | L4 |
 | T-DIC-002 | Tag bank and `sequence` | The `v5k` tag has category and notes; `sequence` preserved | L4 |
 | T-DIC-003 | `mini-freq-occ` | String values read; inverted ordering (higher = better) | L4 |
-| T-DIC-010 | Cancellation | Cancelling halfway → no dictionary registered, no leftover files | L4 |
-| T-DIC-011 | Malicious ZIPs (§4.3) | Each one is rejected with its specific error; no file written outside `dicts/<id>.importing`. `wrapped-dir`, `unicode-path` and `zip64` are accepted | L4 |
+| T-DIC-010 | Cancellation | Cancelling halfway → no dictionary registered, no leftover files. A cancel inside one large bank (60k entries, while it is read, parsed or written) or in the final step stops the import in < 1 s; the parser, the writes and the final step stop at their next check | L1, L4 |
+| T-DIC-011 | Malicious ZIPs (§4.3) | Each one is rejected with its specific error; no file written outside `dicts/<id>.importing`. `wrapped-dir`, `unicode-path` and `zip64` are accepted. The zips of `import.json` (§5.3): wrapper folders, macOS files, directory entries, Unicode Path fields, ZIP64 sentinels, broken deflate streams, lying sizes, a damaged dictionary file | L4 |
 | T-DIC-012 | Limits | A glossary > 10 MiB makes the import fail cleanly | L4 |
 | T-DIC-013 | Crash during import | Child process killed with SIGKILL halfway → on restart, no partial dictionary; the `.importing` folder is deleted | L4 |
-| T-DIC-014 | Disk full | Small tmpfs filesystem → `ERR_STORAGE_FULL`, full cleanup | L4 (Linux) |
+| T-DIC-014 | Disk full | Small tmpfs filesystem → `ERR_STORAGE_FULL`, full cleanup; a file size limit reached halfway (`ulimit -f`, child process) → failed import, full cleanup | L4 (Linux) |
 | T-DIC-015 | Type detection | Vectors: term, kanji, freq, pitch, term+kanji | L1 |
-| T-DIC-016 | Same revision / new revision | Rejection / update offer with atomic replacement | L4 |
+| T-DIC-016 | Same revision / new revision | Rejection / update offer with atomic replacement. The registration checks the registry again: the same dictionary imported twice at once is registered once; an update whose old dictionary was deleted meanwhile is added; an old folder that cannot be removed does not fail the update (the lookup cache is dropped, the next start removes the folder) | L4 |
 | T-DIC-021 | Deletion | The file is closed and deleted; the registry is updated; the lookup cache is invalidated | L4 |
+| T-DIC-022 | Concurrent registry edits | 8 threads edit the registry at once while one dictionary is deleted → no edit is lost and the deleted one does not come back | L4 |
+| T-DIC-030 | Dictionaries by type | Each dictionary is under its main type (terms, kanji, frequencies, pitch accent, in this order), with a reference row under each of its other types; title, revision, language, entries, size and import date shown; a reference has no controls | L1 |
+| T-DIC-031 | Order by drag and drop | A row dragged by its handle over the upper or lower half of a row of its type (a reference too) shows the marker there and moves just above or below it; next to itself or over another type nothing is marked or sent; in the order only the dragged dictionary moves, and ▲/▼ step over the rows of its type; the order decides the glossaries (L4) | L1, L4 |
 | T-DIC-032 | Disabled dictionary | It is not queried (spy store) and does not consume the budget | L1 |
-| T-DIC-035 | Per-dictionary style subset | The style subset of dictionary A does not affect dictionary B (view-model snapshot and L6 check) | L3/L6 |
+| T-DIC-035 | Per-dictionary style subset | The style subset of dictionary A does not affect dictionary B (view-model snapshot); the check of a stylesheet reports the rules applied, the properties left out and the rules ignored (L1); the page's editor shows that report, saves, reverts and clears the user's CSS of a term dictionary (L1); the registry keeps it across an update and a restart and drops the cached lookup (L4); saved on the page, it restyles the popup after the dictionary's `styles.css`, and stays after a restart (L6) | L1/L3/L4/L6 |
 
 ### 6.5 Lookup
 
@@ -261,13 +317,13 @@ Format: **ID** · what is checked · data and expected result · level. Each sec
 | T-POP-001/004/005 | Pause/resume state machine | (playing) click → pause and `paused_for_lookup`; close → resume. (paused) click → no change; close → stays paused. Click on another word with the popup open → replacement, stays paused. Nested: resume only when the stack is empty | L1 |
 | T-POP-002 | Highlighting | Overlay snapshot: exactly `best_length` graphemes marked starting from the clicked one, even with composite graphemes (emoji, combining marks) | L3 |
 | T-POP-003 | Hover | Shift + movement ≥ 8 px → lookup; no new lookup on the same character; leaving for 320 ms → close and resume (fake clock) | L1 |
-| T-POP-006 | Positioning | Property: for every word rectangle and every window ≥ 320×240, the popup does not cover the word and fits inside the window | L2 |
+| T-POP-006 | Positioning and size | Property: for every word rectangle and every window ≥ 320×240, the popup does not cover the word and fits inside the window (L2). A popup is as wide as the configured maximum (`[popup]`) and as tall as its content up to it; sizes out of range in `config.toml` are brought within it, and values that are not numbers take the default (L1). Dragging the border (L1, `egui_kittest`): the edge away from the word and the side edges follow the pointer, the popup keeps its side of the word (also once small enough for the other side) and stays centred on it; dragged past the window it stops at the window's edges and at the configured bounds; the next popups take the dragged size, and a size that was not dragged keeps its value. Property (L2): a popup kept on either side, at any size, does not cover the word and fits inside the window | L1, L2 |
 | T-POP-007 | Header | View-model and AccessKit snapshot of the entry `食べました` → headword `食べる` with furigana, trace chip, frequencies, pitch accent, tags | L3 |
 | T-POP-008 | Per-dictionary blocks | View-model snapshot: numeric tags hidden; a part-of-speech tag repeated on consecutive senses is omitted; collapsed state respected | L3 |
 | T-POP-009 | Structured content | View-model snapshot for table, ruby, list, details. Disallowed tags (`script`, `iframe`, `style`) and `on*` attributes removed; disallowed style properties removed | L3 |
 | T-POP-010 | Images | A PNG from the media table is decoded to its pixels, once per path; a nonexistent path, an SVG or a damaged file → alternative text only; a large image is scaled down to 1280 pixels; `..` → rejected; the drawn size keeps the aspect and the flow's width | L1 |
 | T-POP-011 | Internal links | The link text excludes `<rt>` (BUG-2456); a click on a link asks for a nested lookup next to it, or for the browser; only `http(s)` addresses are opened (L1); an external link reaches the `OpenURI` portal (spy portal on a private bus, L4) | L1, L4 |
-| T-POP-012 | Nesting | Depth 8 at most; Esc closes only the last one; a click on the parent closes the children | L1 |
+| T-POP-012 | Nesting | Depth 8 at most; Esc closes only the last one; a click on the parent closes the children. A drag across glossary text (one paragraph, or a line of runs with ruby, chips and links, the readings left out) looks the selection up in a child popup next to it and stays lit while that popup is open; a click still follows a link; the summary of a `details` does not select; a drag on text does not scroll the popup (`egui_kittest`) | L1 |
 | T-POP-013 | Kanji entry | View-model and AccessKit snapshot for `食` from `mini-kanji` | L3 |
 | T-POP-014 | Keyboard | Tab, Enter, Ctrl+Enter, Esc, Alt+wheel (harness) | L6 |
 | T-POP-015 | Replay and go to sentence | From the popup: "replay" restarts from the start of the cue and stops at the end; "go" closes the popup and takes the player to the start of the cue (harness) | L6 |
@@ -276,7 +332,7 @@ Format: **ID** · what is checked · data and expected result · level. Each sec
 
 | ID | Check | Expected | L |
 |---|---|---|---|
-| T-SEC-001 | `mini-ja` entry with `<script>`, `on*` attributes and a remote `<img>` | Only allowlisted view-model nodes are produced; no network request (spy proxy) | L6 |
+| T-SEC-001 | `mini-ja` entry `危険` with `<script>`, `on*` attributes, a remote `<img>` and a `javascript:` link, through the real import, lookup and popup content builder | Only allowlisted view-model nodes are produced: exactly the span's text and colour and a lookup link, every link a lookup or `http(s)`, every image a path inside the dictionary with decoded pixels, every style within the bounds of DIC-035 (L1); drawn with `egui_kittest` it opens nothing until the link is clicked, and the click is a lookup (L3); in the real app (`lookup`, `popup_content`) the same view model, and no network request (spy proxy, no internet socket held, L6) | L1/L3/L6 |
 | T-SEC-002 | Malicious ZIPs | See T-DIC-011 | L4 |
 | T-SEC-003 | Disk writes | During the whole L6 suite, no file created outside the isolated XDG directories and the test's export directories (checked with inotify on the test `$HOME`) | L6 |
 | T-SEC-004 | Release build | `cargo tree -e normal,build,features -p nikomiru-app` without `test-harness`, `test_harness` or `test-support`; the release binary contains none of the harness's strings and starts, opens a file and quits on SIGTERM (L6) | L4 |
@@ -403,7 +459,7 @@ Format: **ID** · what is checked · data and expected result · level. Each sec
 
 | ID | Check | Expected | L |
 |---|---|---|---|
-| T-REL-001 | SIGKILL during: import, config write, progress saving, mining (child process) | On restart, consistent state: no corrupt DB, no partial dictionary, no orphan media registered | L4 |
+| T-REL-001 | SIGKILL during: import, config write, progress saving, mining (child process); a normal quit during an import (L6) | On restart, consistent state: no corrupt DB, no partial dictionary, no orphan media registered; a quit during an import cancels it, exits at once and leaves no repair, record or staging folder | L4, L6 |
 | T-REL-002 | Anki closed during mining | "Connection refused" error, no panic, no orphan media | L4 |
 | T-FUZZ-005 | Yomitan term bank JSON | No panic; typed error | L2 |
 | T-FUZZ-006 | Structured content → view model | No panic; the output contains only nodes from the allowlist | L2 |

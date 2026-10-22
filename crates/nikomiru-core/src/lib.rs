@@ -16,6 +16,6 @@ pub mod paths;
 
 pub use cancel::Cancel;
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use config::{Config, ConfigError, LookupConfig, PathsConfig, SubtitlesConfig};
+pub use config::{Config, ConfigError, LookupConfig, PathsConfig, PopupConfig, SubtitlesConfig};
 pub use error::Localized;
 pub use paths::{Paths, PathsError};

@@ -6,6 +6,11 @@
 //! dictionary is written to `dicts/<id>.importing/` and the folder is renamed
 //! to `dicts/<id>/` only after the commit (DIC-013), so an error, a
 //! cancellation or a crash leaves nothing behind.
+//!
+//! A cancel is honoured within a fraction of a second at every step, a single
+//! JMdict-sized bank included: entries are read a chunk at a time, banks are
+//! parsed and written a stretch of rows at a time, and the final step looks
+//! at it too. Only redb's commit and compaction cannot be interrupted.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -34,6 +39,11 @@ pub const MAX_GLOSSARY: usize = 10 << 20;
 pub const DB_FILE: &str = "dict.redb";
 /// Suffix of a folder that is being written.
 pub const IMPORTING: &str = ".importing";
+
+/// Bytes of an entry decompressed between two looks at the cancel flag.
+const READ_CHUNK: u64 = 1 << 20;
+/// Rows of a bank written between two looks at the cancel flag.
+const WRITE_CHUNK: usize = 4096;
 
 /// Why an entry of the zip is refused (DIC-011).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,7 +236,7 @@ fn ignored(name: &str) -> bool {
 }
 
 /// Opens `zip` and checks every entry (DIC-011); returns the entries with the
-/// single wrapper folder, if any, removed from their names.
+/// wrapper folders, if any, removed from their names.
 fn checked_entries(zip: &mut zip::ZipArchive<File>) -> Result<Vec<Entry>, ImportError> {
     let mut entries = Vec::new();
     let mut total: u64 = 0;
@@ -271,12 +281,13 @@ fn checked_entries(zip: &mut zip::ZipArchive<File>) -> Result<Vec<Entry>, Import
             size,
         });
     }
-    // a single wrapper folder (`dict/index.json`) is stripped (BUG-2053)
-    if !entries.iter().any(|e| e.name == "index.json")
+    // a folder holding the whole archive (`dict/index.json`) is stripped,
+    // again while index.json is not at the root (BUG-2053)
+    while !entries.iter().any(|e| e.name == "index.json")
         && let Some(prefix) = entries
-            .iter()
-            .find(|e| e.name.ends_with("/index.json") && e.name.matches('/').count() == 1)
-            .map(|e| e.name.trim_end_matches("index.json").to_string())
+            .first()
+            .and_then(|e| e.name.split_once('/'))
+            .map(|(folder, _)| format!("{folder}/"))
         && entries.iter().all(|e| e.name.starts_with(&prefix))
     {
         for e in &mut entries {
@@ -286,15 +297,30 @@ fn checked_entries(zip: &mut zip::ZipArchive<File>) -> Result<Vec<Entry>, Import
     Ok(entries)
 }
 
-/// Reads an entry, refusing more bytes than declared (a lying header is a bomb).
-fn read_entry(zip: &mut zip::ZipArchive<File>, entry: &Entry) -> Result<Vec<u8>, ImportError> {
+/// Reads an entry, refusing more bytes than declared (a lying header is a
+/// bomb), a [`READ_CHUNK`] at a time so that a cancel stops a large one.
+fn read_entry(
+    zip: &mut zip::ZipArchive<File>,
+    entry: &Entry,
+    cancel: &Cancel,
+) -> Result<Vec<u8>, ImportError> {
     let file = zip
         .by_index(entry.index)
         .map_err(|e| ImportError::Zip(e.to_string()))?;
     let mut bytes = Vec::with_capacity(entry.size.min(64 << 20) as usize);
-    file.take(entry.size + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| ImportError::Zip(format!("{}: {e}", entry.name)))?;
+    let mut file = file.take(entry.size + 1);
+    loop {
+        if cancel.is_cancelled() {
+            return Err(ImportError::Cancelled);
+        }
+        let read = (&mut file)
+            .take(READ_CHUNK)
+            .read_to_end(&mut bytes)
+            .map_err(|e| ImportError::Zip(format!("{}: {e}", entry.name)))?;
+        if read == 0 {
+            break;
+        }
+    }
     if bytes.len() as u64 > entry.size {
         return Err(ImportError::Unsafe {
             entry: entry.name.clone(),
@@ -321,7 +347,7 @@ pub fn read_index(path: &Path) -> Result<Index, ImportError> {
         .iter()
         .find(|e| e.name == "index.json")
         .ok_or(ImportError::NoIndex)?;
-    let bytes = read_entry(&mut zip, entry)?;
+    let bytes = read_entry(&mut zip, entry, &Cancel::new())?;
     yomitan::parse_index(&bytes).map_err(|error| ImportError::Format {
         file: "index.json".into(),
         error,
@@ -361,7 +387,14 @@ pub fn import(
         }
     };
     std::fs::create_dir_all(&staging).map_err(io(&staging))?;
-    let result = write(path, &staging, cancel, &mut progress);
+    let result = write(path, &staging, cancel, &mut progress).and_then(|info| {
+        // a cancel that came during the commit or the compaction still counts
+        if cancel.is_cancelled() {
+            Err(ImportError::Cancelled)
+        } else {
+            Ok(info)
+        }
+    });
     match result {
         Ok(info) => {
             let dir = dicts_dir.join(&id);
@@ -378,6 +411,39 @@ pub fn import(
     }
 }
 
+/// The rows of a parsed bank; the parser gives `None` when the cancel
+/// stopped it.
+fn parsed<T>(file: &str, rows: Result<Option<Vec<T>>, FormatError>) -> Result<Vec<T>, ImportError> {
+    match rows {
+        Ok(Some(rows)) => Ok(rows),
+        Ok(None) => Err(ImportError::Cancelled),
+        Err(error) => Err(ImportError::Format {
+            file: file.to_string(),
+            error,
+        }),
+    }
+}
+
+/// Writes `rows` to the store a [`WRITE_CHUNK`] at a time, looking at
+/// `cancel` between chunks: a large bank takes seconds to write.
+fn write_rows<T>(
+    rows: Vec<T>,
+    cancel: &Cancel,
+    mut write: impl FnMut(Vec<T>) -> Result<(), StoreError>,
+) -> Result<(), ImportError> {
+    let mut rows = rows.into_iter();
+    loop {
+        if cancel.is_cancelled() {
+            return Err(ImportError::Cancelled);
+        }
+        let chunk: Vec<T> = rows.by_ref().take(WRITE_CHUNK).collect();
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        write(chunk)?;
+    }
+}
+
 fn write(
     path: &Path,
     staging: &Path,
@@ -390,12 +456,13 @@ fn write(
         .iter()
         .find(|e| e.name == "index.json")
         .ok_or(ImportError::NoIndex)?;
-    let index = yomitan::parse_index(&read_entry(&mut zip, index_entry)?).map_err(|error| {
-        ImportError::Format {
-            file: "index.json".into(),
-            error,
-        }
-    })?;
+    let index =
+        yomitan::parse_index(&read_entry(&mut zip, index_entry, cancel)?).map_err(|error| {
+            ImportError::Format {
+                file: "index.json".into(),
+                error,
+            }
+        })?;
     let mut banks: BTreeMap<(Bank, u32), &Entry> = BTreeMap::new();
     let mut styles: Option<&Entry> = None;
     let mut media: Vec<&Entry> = Vec::new();
@@ -419,45 +486,38 @@ fn write(
     progress(state);
 
     let mut writer = StoreWriter::create(&staging.join(DB_FILE))?;
-    let format = |file: &str| {
-        let file = file.to_string();
-        move |error| ImportError::Format { file, error }
-    };
     for ((bank, _), entry) in &banks {
-        if cancel.is_cancelled() {
-            return Err(ImportError::Cancelled);
-        }
-        let bytes = read_entry(&mut zip, entry)?;
+        let bytes = read_entry(&mut zip, entry, cancel)?;
+        let name = entry.name.as_str();
         let added = match bank {
             Bank::Terms => {
-                let terms =
-                    yomitan::parse_terms(&bytes, index.format).map_err(format(&entry.name))?;
+                let terms = parsed(name, yomitan::parse_terms(&bytes, index.format, cancel))?;
                 if let Some(t) = terms.iter().find(|t| t.glossary.len() > MAX_GLOSSARY) {
                     return Err(ImportError::GlossaryTooLarge {
                         expression: t.expression.clone(),
                     });
                 }
                 let n = terms.len();
-                writer.add_terms(terms)?;
+                write_rows(terms, cancel, |rows| writer.add_terms(rows))?;
                 n
             }
             Bank::TermMeta | Bank::KanjiMeta => {
-                let meta = yomitan::parse_meta_bank(&bytes).map_err(format(&entry.name))?;
+                let meta = parsed(name, yomitan::parse_meta_bank(&bytes, cancel))?;
                 let n = meta.len();
-                writer.add_meta(meta, *bank == Bank::KanjiMeta)?;
+                let kanji = *bank == Bank::KanjiMeta;
+                write_rows(meta, cancel, |rows| writer.add_meta(rows, kanji))?;
                 n
             }
             Bank::Kanji => {
-                let kanji =
-                    yomitan::parse_kanji(&bytes, index.format).map_err(format(&entry.name))?;
+                let kanji = parsed(name, yomitan::parse_kanji(&bytes, index.format, cancel))?;
                 let n = kanji.len();
-                writer.add_kanji(kanji)?;
+                write_rows(kanji, cancel, |rows| writer.add_kanji(rows))?;
                 n
             }
             Bank::Tags => {
-                let tags = yomitan::parse_tags(&bytes).map_err(format(&entry.name))?;
+                let tags = parsed(name, yomitan::parse_tags(&bytes, cancel))?;
                 let n = tags.len();
-                writer.add_tags(tags)?;
+                write_rows(tags, cancel, |rows| writer.add_tags(rows))?;
                 n
             }
         };
@@ -469,10 +529,7 @@ fn write(
         progress(state);
     }
     for entry in media {
-        if cancel.is_cancelled() {
-            return Err(ImportError::Cancelled);
-        }
-        let bytes = read_entry(&mut zip, entry)?;
+        let bytes = read_entry(&mut zip, entry, cancel)?;
         writer.add_media(&entry.name, &bytes)?;
         state.files_done += 1;
         progress(state);
@@ -489,13 +546,12 @@ fn write(
         return Err(ImportError::Empty);
     }
     let styles = match styles {
-        Some(e) => String::from_utf8_lossy(&read_entry(&mut zip, e)?).into_owned(),
+        Some(e) => String::from_utf8_lossy(&read_entry(&mut zip, e, cancel)?).into_owned(),
         None => String::new(),
     };
-    if cancel.is_cancelled() {
-        return Err(ImportError::Cancelled);
-    }
-    Ok(writer.finish(index, kinds, styles)?)
+    writer
+        .finish(index, kinds, styles, cancel)?
+        .ok_or(ImportError::Cancelled)
 }
 
 #[cfg(test)]
@@ -518,6 +574,27 @@ mod tests {
                 && ignored("a/.DS_Store")
                 && !ignored("img/a.png")
         );
+    }
+
+    // T-DIC-010
+    #[test]
+    fn rows_are_written_a_chunk_at_a_time_until_a_cancel() {
+        let cancel = Cancel::new();
+        let mut chunks = Vec::new();
+        let stopped = write_rows((0..3 * WRITE_CHUNK).collect(), &cancel, |rows| {
+            chunks.push(rows.len());
+            cancel.cancel();
+            Ok(())
+        });
+        assert!(matches!(stopped, Err(ImportError::Cancelled)));
+        assert_eq!(chunks, [WRITE_CHUNK], "the rest is not written");
+        let mut written = Vec::new();
+        write_rows((0..2 * WRITE_CHUNK + 1).collect(), &Cancel::new(), |rows| {
+            written.extend(rows);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(written, (0..2 * WRITE_CHUNK + 1).collect::<Vec<_>>());
     }
 
     // T-ERR-001

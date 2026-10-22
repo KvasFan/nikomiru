@@ -10,11 +10,13 @@ mod common;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use common::zipped;
 
 use nikomiru_core::Cancel;
-use nikomiru_dict::import::{ImportError, Unsafe, cleanup, import, read_index};
+use nikomiru_dict::import::{ImportError, Imported, Progress, Unsafe, cleanup, import, read_index};
 use nikomiru_dict::store::{DictStore, Field, RedbStore};
 use nikomiru_dict::yomitan::{FrequencyMode, Meta};
 
@@ -165,8 +167,9 @@ fn a_glossary_over_10_mib_fails_cleanly() {
 }
 
 /// A zip with `n` terms whose glossaries do not compress well, in files of
-/// 1000 terms: big enough to fill a small filesystem, slow enough to kill.
-fn synthetic(dir: &Path, n: usize) -> PathBuf {
+/// `per_bank` terms: big enough to fill a small filesystem, slow enough to
+/// kill.
+fn synthetic(dir: &Path, n: usize, per_bank: usize) -> PathBuf {
     let path = dir.join("synthetic.zip");
     let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
     let options = zip::write::SimpleFileOptions::default();
@@ -174,8 +177,8 @@ fn synthetic(dir: &Path, n: usize) -> PathBuf {
     zip.write_all(br#"{"title":"Synthetic","revision":"1","format":3}"#)
         .unwrap();
     let mut state = 0x2545_f491_u64;
-    for bank in 0..n.div_ceil(1000) {
-        let terms: Vec<String> = (bank * 1000..n.min(bank * 1000 + 1000))
+    for bank in 0..n.div_ceil(per_bank) {
+        let terms: Vec<String> = (bank * per_bank..n.min((bank + 1) * per_bank))
             .map(|i| {
                 let gloss: String = (0..200)
                     .map(|_| {
@@ -197,16 +200,69 @@ fn synthetic(dir: &Path, n: usize) -> PathBuf {
     path
 }
 
+/// Imports `zip`, cancelling it `after` the first progress that `when`
+/// accepts; returns the result and how long the import went on after the
+/// cancel.
+fn cancelled(
+    zip: &Path,
+    dicts: &Path,
+    when: fn(Progress) -> bool,
+    after: Duration,
+) -> (Result<Imported, ImportError>, Duration) {
+    let cancel = Cancel::new();
+    let fired = Arc::new(Mutex::new(None));
+    let mut timer = None;
+    let result = import(zip, dicts, &cancel, |p| {
+        if timer.is_none() && when(p) {
+            let (cancel, fired) = (cancel.clone(), Arc::clone(&fired));
+            timer = Some(std::thread::spawn(move || {
+                std::thread::sleep(after);
+                *fired.lock().unwrap() = Some(Instant::now());
+                cancel.cancel();
+            }));
+        }
+    });
+    let ended = Instant::now();
+    timer.unwrap().join().unwrap();
+    let fired = fired.lock().unwrap().unwrap();
+    (result, ended.saturating_duration_since(fired))
+}
+
+// T-DIC-010
+#[test]
+fn a_cancel_inside_one_large_bank_or_the_final_step_stops_at_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    // some dictionaries come as one large bank
+    let zip = synthetic(tmp.path(), 60_000, 60_000);
+    let dicts = tmp.path().join("dicts");
+    let check = |step: &str, when: fn(Progress) -> bool, after: u64| {
+        let (result, waited) = cancelled(&zip, &dicts, when, Duration::from_millis(after));
+        eprintln!("T-DIC-010 cancel {step}: the import stopped {waited:?} later");
+        assert!(
+            matches!(result, Err(ImportError::Cancelled)),
+            "{step}: {result:?}"
+        );
+        assert!(
+            leftovers(&dicts).is_empty(),
+            "{step}: {:?}",
+            leftovers(&dicts)
+        );
+        assert!(waited < Duration::from_secs(1), "{step}: {waited:?}");
+    };
+    check("inside the bank", |p| p.files_done == 0, 150);
+    check("in the final step", |p| p.files_done == p.files_total, 50);
+}
+
 const CHILD_ZIP: &str = "NIKOMIRU_TEST_IMPORT_ZIP";
 const CHILD_DICTS: &str = "NIKOMIRU_TEST_IMPORT_DICTS";
 const CHILD_MODE: &str = "NIKOMIRU_TEST_IMPORT_MODE";
 const HALFWAY: &str = "nikomiru-import-halfway";
 
-/// Runs only as the child of the two tests below: imports `CHILD_ZIP` into
-/// `CHILD_DICTS`, either stalling halfway (`stall`, to be killed) or expecting
-/// a full disk (`full`).
+/// Runs only as the child of the tests below: imports `CHILD_ZIP` into
+/// `CHILD_DICTS`, either stalling halfway (`stall`, to be killed), expecting
+/// a full disk (`full`) or any failed write (`limit`).
 #[test]
-#[ignore = "child process of the L4 crash and disk-full tests"]
+#[ignore = "child process of the L4 crash, disk-full and write-limit tests"]
 fn child_import() {
     let (Ok(zip), Ok(dicts), Ok(mode)) = (
         std::env::var(CHILD_ZIP),
@@ -222,9 +278,14 @@ fn child_import() {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }
     });
-    assert_eq!(mode, "full", "the stalled import must be killed");
-    let err = result.unwrap_err();
-    assert!(matches!(err, ImportError::StorageFull), "{err}");
+    match mode.as_str() {
+        "full" => {
+            let err = result.unwrap_err();
+            assert!(matches!(err, ImportError::StorageFull), "{err}");
+        }
+        "limit" => assert!(result.is_err(), "the import wrote past the limit"),
+        _ => panic!("the stalled import must be killed"),
+    }
     assert!(leftovers(dicts).is_empty(), "{:?}", leftovers(dicts));
 }
 
@@ -248,7 +309,7 @@ fn child(mode: &str, zip: &Path, dicts: &Path) -> std::process::Command {
 fn an_import_killed_halfway_is_cleaned_up_on_restart() {
     use std::io::BufRead;
     let tmp = tempfile::tempdir().unwrap();
-    let zip = synthetic(tmp.path(), 8000);
+    let zip = synthetic(tmp.path(), 8000, 1000);
     let dicts = tmp.path().join("dicts");
     std::fs::create_dir_all(dicts.join("installed")).unwrap();
     let mut proc = child("stall", &zip, &dicts)
@@ -280,7 +341,7 @@ fn an_import_killed_halfway_is_cleaned_up_on_restart() {
 #[ignore = "L4: needs unprivileged user namespaces (unshare)"]
 fn a_full_disk_fails_with_storage_full_and_cleans_up() {
     let tmp = tempfile::tempdir().unwrap();
-    let zip = synthetic(tmp.path(), 20_000);
+    let zip = synthetic(tmp.path(), 20_000, 1000);
     let mount = tmp.path().join("small");
     std::fs::create_dir_all(&mount).unwrap();
     // a 1 MiB tmpfs in a private mount namespace; the import needs ~5 MiB
@@ -305,6 +366,34 @@ fn a_full_disk_fails_with_storage_full_and_cleans_up() {
         stdout.contains("1 passed"),
         "the child test did not run: {stdout}"
     );
+}
+
+// T-DIC-014: a write that fails halfway, as on a full disk; ported from
+// Fushi's import_failure_boundary_test.cpp, case 6 (ac8034e)
+#[test]
+fn an_import_that_cannot_write_fails_and_leaves_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let zip = synthetic(tmp.path(), 4000, 1000);
+    let dicts = tmp.path().join("dicts");
+    // the file size limit stands for the full disk: every write past it fails
+    // (EFBIG); SIGXFSZ, which would kill the child first, is ignored
+    let inner = child("limit", &zip, &dicts);
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(r#"trap '' XFSZ && ulimit -f 64 && exec "$@""#)
+        .arg("sh")
+        .arg(inner.get_program())
+        .args(inner.get_args())
+        .envs(inner.get_envs().filter_map(|(k, v)| Some((k, v?))))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(leftovers(&dicts).is_empty(), "{:?}", leftovers(&dicts));
 }
 
 fn fixture(name: &str) -> PathBuf {

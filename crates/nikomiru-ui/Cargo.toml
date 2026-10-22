@@ -35,6 +35,8 @@ egui_kittest.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 nikomiru-dict = { workspace = true, features = ["test-support"] }
+# the T-SEC-001 tests zip the mini-ja source folder for the real importer
+zip.workspace = true
 
 [lints]
 workspace = true

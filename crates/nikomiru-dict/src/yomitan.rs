@@ -6,6 +6,10 @@
 //! and odd rows (format 1, decimal scores, missing fields) do not stop an
 //! import.
 
+use std::marker::PhantomData;
+
+use nikomiru_core::Cancel;
+use serde::de::{self, Deserializer as _, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -60,9 +64,11 @@ fn text(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Parses `index.json`.
+/// Parses `index.json`. Bytes that are not UTF-8 become U+FFFD, as in Fushi:
+/// a damaged title must not stop the import (BUG-2952).
 pub fn parse_index(bytes: &[u8]) -> Result<Index, FormatError> {
-    let v: Value = serde_json::from_slice(bytes).map_err(|e| err(format!("index.json: {e}")))?;
+    let json = String::from_utf8_lossy(bytes);
+    let v: Value = serde_json::from_str(&json).map_err(|e| err(format!("index.json: {e}")))?;
     let title = text(&v, "title").ok_or_else(|| err("index.json has no title"))?;
     let revision = match v.get("revision") {
         Some(Value::String(s)) => s.clone(),
@@ -134,8 +140,80 @@ pub struct Term {
     pub term_tags: String,
 }
 
-fn rows(bytes: &[u8]) -> Result<Vec<Vec<&RawValue>>, FormatError> {
-    serde_json::from_slice(bytes).map_err(|e| err(e.to_string()))
+/// Rows of a bank read between two looks at the cancel flag.
+const ROWS_PER_CHECK: usize = 1024;
+
+/// What a row becomes: `None` skips it, an error stops the bank.
+type Convert<T> = Result<Option<T>, FormatError>;
+
+/// Reads the rows of a bank one at a time and converts each as it comes.
+struct BankReader<'a, R, F> {
+    convert: F,
+    cancel: &'a Cancel,
+    failed: &'a mut Option<FormatError>,
+    row: PhantomData<R>,
+}
+
+impl<'de, R, T, F> Visitor<'de> for BankReader<'_, R, F>
+where
+    R: Deserialize<'de>,
+    F: FnMut(usize, R) -> Convert<T>,
+{
+    type Value = Vec<T>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an array of rows")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(mut self, mut seq: A) -> Result<Vec<T>, A::Error> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(row) = seq.next_element()? {
+            match (self.convert)(i, row) {
+                Ok(Some(v)) => out.push(v),
+                Ok(None) => {}
+                Err(e) => {
+                    *self.failed = Some(e);
+                    return Err(de::Error::custom("invalid row"));
+                }
+            }
+            i += 1;
+            if i.is_multiple_of(ROWS_PER_CHECK) && self.cancel.is_cancelled() {
+                return Err(de::Error::custom("cancelled"));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The rows of a bank, each converted by `convert` as soon as it is read.
+/// A large bank (a whole JMdict in one file) takes seconds to read, so
+/// `cancel` is looked at every [`ROWS_PER_CHECK`] rows: `Ok(None)` when it
+/// stopped the read (DIC-010).
+fn rows<'a, R: Deserialize<'a>, T>(
+    bytes: &'a [u8],
+    cancel: &Cancel,
+    convert: impl FnMut(usize, R) -> Convert<T>,
+) -> Result<Option<Vec<T>>, FormatError> {
+    let mut failed = None;
+    let mut reader = serde_json::Deserializer::from_slice(bytes);
+    let read = (&mut reader).deserialize_seq(BankReader {
+        convert,
+        cancel,
+        failed: &mut failed,
+        row: PhantomData,
+    });
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    match read {
+        Ok(rows) => {
+            reader.end().map_err(|e| err(e.to_string()))?;
+            Ok(Some(rows))
+        }
+        Err(_) if cancel.is_cancelled() => Ok(None),
+        Err(e) => Err(err(e.to_string())),
+    }
 }
 
 fn raw_str(raw: Option<&&RawValue>) -> String {
@@ -152,47 +230,47 @@ fn raw_f64(raw: Option<&&RawValue>) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Parses a `term_bank_*.json`. Format 1 puts the glossary strings after the
-/// score instead of an array.
-pub fn parse_terms(bytes: &[u8], format: u32) -> Result<Vec<Term>, FormatError> {
-    rows(bytes)?
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            if row.len() < 5 {
-                return Err(err(format!("term {i}: {} fields", row.len())));
-            }
-            let expression = raw_str(row.first());
-            if expression.is_empty() {
-                return Err(err(format!("term {i}: no expression")));
-            }
-            let reading = Some(raw_str(row.get(1)))
-                .filter(|r| !r.is_empty())
-                .unwrap_or_else(|| expression.clone());
-            let glossary = if format == 1 {
-                let items: Vec<&str> = row[5..].iter().map(|r| r.get()).collect();
-                format!("[{}]", items.join(","))
-            } else {
-                row.get(5)
-                    .map_or_else(|| "[]".to_string(), |r| r.get().to_string())
-            };
-            let (sequence, term_tags) = if format == 1 {
-                (0, String::new())
-            } else {
-                (raw_f64(row.get(6)) as i64, raw_str(row.get(7)))
-            };
-            Ok(Term {
-                expression,
-                reading,
-                definition_tags: raw_str(row.get(2)),
-                rules: raw_str(row.get(3)),
-                score: raw_f64(row.get(4)),
-                glossary,
-                sequence,
-                term_tags,
-            })
-        })
-        .collect()
+/// Parses a `term_bank_*.json`; `None` when `cancel` stopped it. Format 1
+/// puts the glossary strings after the score instead of an array.
+pub fn parse_terms(
+    bytes: &[u8],
+    format: u32,
+    cancel: &Cancel,
+) -> Result<Option<Vec<Term>>, FormatError> {
+    rows(bytes, cancel, |i, row: Vec<&RawValue>| {
+        if row.len() < 5 {
+            return Err(err(format!("term {i}: {} fields", row.len())));
+        }
+        let expression = raw_str(row.first());
+        if expression.is_empty() {
+            return Err(err(format!("term {i}: no expression")));
+        }
+        let reading = Some(raw_str(row.get(1)))
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| expression.clone());
+        let glossary = if format == 1 {
+            let items: Vec<&str> = row[5..].iter().map(|r| r.get()).collect();
+            format!("[{}]", items.join(","))
+        } else {
+            row.get(5)
+                .map_or_else(|| "[]".to_string(), |r| r.get().to_string())
+        };
+        let (sequence, term_tags) = if format == 1 {
+            (0, String::new())
+        } else {
+            (raw_f64(row.get(6)) as i64, raw_str(row.get(7)))
+        };
+        Ok(Some(Term {
+            expression,
+            reading,
+            definition_tags: raw_str(row.get(2)),
+            rules: raw_str(row.get(3)),
+            score: raw_f64(row.get(4)),
+            glossary,
+            sequence,
+            term_tags,
+        }))
+    })
 }
 
 /// A frequency value (DIC-003).
@@ -302,7 +380,11 @@ fn frequency(data: &Value) -> Option<Frequency> {
     }
     let (value, display) = frequency_value(data)?;
     Some(Frequency {
-        reading: None,
+        // a reading next to the value, `{reading, value}`, as Fushi reads it
+        reading: data
+            .get("reading")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         value,
         display,
     })
@@ -385,17 +467,18 @@ fn parse_meta(mode: &str, data: &Value) -> Option<Meta> {
 }
 
 /// Parses a `term_meta_bank_*.json` or `kanji_meta_bank_*.json`: `(key, meta)`
-/// pairs; unknown modes and malformed rows are skipped.
-pub fn parse_meta_bank(bytes: &[u8]) -> Result<Vec<(String, Meta)>, FormatError> {
-    let rows: Vec<Value> = serde_json::from_slice(bytes).map_err(|e| err(e.to_string()))?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let key = row.get(0)?.as_str()?.to_string();
-            let mode = row.get(1)?.as_str()?;
-            Some((key, parse_meta(mode, row.get(2)?)?))
-        })
-        .collect())
+/// pairs; unknown modes and malformed rows are skipped. `None` when `cancel`
+/// stopped it.
+pub fn parse_meta_bank(
+    bytes: &[u8],
+    cancel: &Cancel,
+) -> Result<Option<Vec<(String, Meta)>>, FormatError> {
+    fn pair(row: &Value) -> Option<(String, Meta)> {
+        let key = row.get(0)?.as_str()?.to_string();
+        let mode = row.get(1)?.as_str()?;
+        Some((key, parse_meta(mode, row.get(2)?)?))
+    }
+    rows(bytes, cancel, |_, row: Value| Ok(pair(&row)))
 }
 
 /// A kanji entry.
@@ -415,60 +498,67 @@ pub struct Kanji {
     pub stats: Vec<(String, String)>,
 }
 
-/// Parses a `kanji_bank_*.json` (format 1 puts the meanings after the tags).
-pub fn parse_kanji(bytes: &[u8], format: u32) -> Result<Vec<Kanji>, FormatError> {
-    let rows: Vec<Value> = serde_json::from_slice(bytes).map_err(|e| err(e.to_string()))?;
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let a = row
-                .as_array()
-                .ok_or_else(|| err(format!("kanji {i}: not an array")))?;
-            let s = |k: usize| {
-                a.get(k)
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            let character = s(0);
-            if character.is_empty() {
-                return Err(err(format!("kanji {i}: no character")));
-            }
-            let (meanings, stats) = if format == 1 {
-                (
-                    a[4.min(a.len())..]
-                        .iter()
-                        .filter_map(|m| m.as_str().map(str::to_string))
-                        .collect(),
-                    Vec::new(),
-                )
-            } else {
-                let stats = a
-                    .get(5)
-                    .and_then(Value::as_object)
-                    .map(|o| {
-                        o.iter()
-                            .map(|(k, v)| {
-                                (
-                                    k.clone(),
-                                    v.as_str().map_or_else(|| v.to_string(), str::to_string),
-                                )
-                            })
-                            .collect()
+/// Parses a `kanji_bank_*.json` (format 1 puts the meanings after the tags);
+/// `None` when `cancel` stopped it. A malformed row (a number where a string
+/// belongs, meanings that are not a list of strings, no character) is
+/// skipped, as in Fushi: one bad row must not drop the bank (BUG-2952).
+pub fn parse_kanji(
+    bytes: &[u8],
+    format: u32,
+    cancel: &Cancel,
+) -> Result<Option<Vec<Kanji>>, FormatError> {
+    rows(bytes, cancel, |_, row: Value| Ok(kanji_row(&row, format)))
+}
+
+fn kanji_row(row: &Value, format: u32) -> Option<Kanji> {
+    let a = row.as_array()?;
+    // the four text fields are strings when present
+    let s = |k: usize| match a.get(k) {
+        None => Some(String::new()),
+        Some(v) => v.as_str().map(str::to_string),
+    };
+    let character = s(0).filter(|c| !c.is_empty())?;
+    let (meanings, stats) = if format == 1 {
+        (
+            a[4.min(a.len())..]
+                .iter()
+                .filter_map(|m| m.as_str().map(str::to_string))
+                .collect(),
+            Vec::new(),
+        )
+    } else {
+        let meanings = match a.get(4) {
+            None => Vec::new(),
+            Some(m) => m
+                .as_array()?
+                .iter()
+                .map(|m| m.as_str().map(str::to_string))
+                .collect::<Option<_>>()?,
+        };
+        let stats = a
+            .get(5)
+            .and_then(Value::as_object)
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_str().map_or_else(|| v.to_string(), str::to_string),
+                        )
                     })
-                    .unwrap_or_default();
-                (strings(a.get(4)), stats)
-            };
-            Ok(Kanji {
-                character,
-                onyomi: s(1),
-                kunyomi: s(2),
-                tags: s(3),
-                meanings,
-                stats,
+                    .collect()
             })
-        })
-        .collect()
+            .unwrap_or_default();
+        (meanings, stats)
+    };
+    Some(Kanji {
+        character,
+        onyomi: s(1)?,
+        kunyomi: s(2)?,
+        tags: s(3)?,
+        meanings,
+        stats,
+    })
 }
 
 /// A tag (DIC-002).
@@ -486,28 +576,25 @@ pub struct Tag {
     pub score: f64,
 }
 
-/// Parses a `tag_bank_*.json`.
-pub fn parse_tags(bytes: &[u8]) -> Result<Vec<Tag>, FormatError> {
-    let rows: Vec<Value> = serde_json::from_slice(bytes).map_err(|e| err(e.to_string()))?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let a = row.as_array()?;
-            let s = |k: usize| {
-                a.get(k)
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            Some(Tag {
-                name: Some(s(0)).filter(|n| !n.is_empty())?,
-                category: s(1),
-                order: a.get(2).and_then(Value::as_f64).unwrap_or(0.0) as i64,
-                notes: s(3),
-                score: a.get(4).and_then(Value::as_f64).unwrap_or(0.0),
-            })
+/// Parses a `tag_bank_*.json`; `None` when `cancel` stopped it.
+pub fn parse_tags(bytes: &[u8], cancel: &Cancel) -> Result<Option<Vec<Tag>>, FormatError> {
+    fn tag(row: &Value) -> Option<Tag> {
+        let a = row.as_array()?;
+        let s = |k: usize| {
+            a.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        Some(Tag {
+            name: Some(s(0)).filter(|n| !n.is_empty())?,
+            category: s(1),
+            order: a.get(2).and_then(Value::as_f64).unwrap_or(0.0) as i64,
+            notes: s(3),
+            score: a.get(4).and_then(Value::as_f64).unwrap_or(0.0),
         })
-        .collect())
+    }
+    rows(bytes, cancel, |_, row: Value| Ok(tag(&row)))
 }
 
 /// What a dictionary contains (DIC-015): every role its banks give it. A
@@ -551,6 +638,11 @@ pub fn detect_kinds(rows: Rows) -> Kinds {
 mod tests {
     use super::*;
 
+    /// The rows of a bank that was not cancelled.
+    fn all<T>(parsed: Result<Option<Vec<T>>, FormatError>) -> Vec<T> {
+        parsed.unwrap().expect("not cancelled")
+    }
+
     #[test]
     fn index_fields() {
         let i = parse_index(r#"{"title":"Mini","revision":3,"format":3,"sequenced":true,"frequencyMode":"occurrence-based","sourceLanguage":"ja"}"#.as_bytes()).unwrap();
@@ -565,12 +657,12 @@ mod tests {
 
     #[test]
     fn term_rows_in_both_formats() {
-        let v3 = parse_terms(
+        let v3 = all(parse_terms(
             r#"[["食べる","たべる","v1 vt","v1",1.5,["to eat",{"type":"structured-content","content":"x"}],1358280,"P"],
                  ["猫","",null,"",0,["cat"],2,""]]"#.as_bytes(),
             3,
-        )
-        .unwrap();
+            &Cancel::new(),
+        ));
         assert_eq!(v3[0].rules, "v1");
         assert_eq!(v3[0].score, 1.5);
         assert_eq!(v3[0].sequence, 1_358_280);
@@ -579,20 +671,66 @@ mod tests {
             r#"["to eat",{"type":"structured-content","content":"x"}]"#
         );
         assert_eq!(v3[1].reading, "猫", "an empty reading is the headword");
-        let v1 = parse_terms(r#"[["犬","いぬ","n","",0,"dog","hound"]]"#.as_bytes(), 1).unwrap();
+        let v1 = all(parse_terms(
+            r#"[["犬","いぬ","n","",0,"dog","hound"]]"#.as_bytes(),
+            1,
+            &Cancel::new(),
+        ));
         assert_eq!(v1[0].glossary, r#"["dog","hound"]"#);
-        assert!(parse_terms(r#"[["x"]]"#.as_bytes(), 3).is_err());
+        assert_eq!(
+            parse_terms(
+                r#"[["猫","",null,"",0,["cat"]],["x"]]"#.as_bytes(),
+                3,
+                &Cancel::new()
+            ),
+            Err(err("term 1: 1 fields"))
+        );
+        assert!(parse_terms(r#"{"x":1}"#.as_bytes(), 3, &Cancel::new()).is_err());
+        assert!(
+            parse_terms(
+                r#"[["猫","",null,"",0,[]]] x"#.as_bytes(),
+                3,
+                &Cancel::new()
+            )
+            .is_err()
+        );
+    }
+
+    // T-DIC-010
+    #[test]
+    fn a_cancel_stops_a_bank_at_the_next_check() {
+        let bank = format!("[{}]", vec!["[1]"; 10 * ROWS_PER_CHECK].join(","));
+        let cancel = Cancel::new();
+        let mut read = 0;
+        let stopped = rows(bank.as_bytes(), &cancel, |i, row: Vec<u32>| {
+            read += 1;
+            if i == ROWS_PER_CHECK + 10 {
+                cancel.cancel();
+            }
+            Ok(Some(row))
+        });
+        assert_eq!(stopped, Ok(None));
+        assert_eq!(read, 2 * ROWS_PER_CHECK, "the rest of the bank is not read");
+        let whole = rows(bank.as_bytes(), &Cancel::new(), |_, row: Vec<u32>| {
+            Ok(Some(row))
+        });
+        assert_eq!(all(whole).len(), 10 * ROWS_PER_CHECK);
+        let terms = format!(
+            "[{}]",
+            vec![r#"["語","ご","n","",0,["word"],1,""]"#; ROWS_PER_CHECK].join(",")
+        );
+        assert_eq!(parse_terms(terms.as_bytes(), 3, &cancel), Ok(None));
     }
 
     // T-DIC-003
     #[test]
     fn frequencies_in_every_shape() {
-        let m = parse_meta_bank(
+        let m = all(parse_meta_bank(
             r#"[["a","freq",12],["b","freq","1500㋕"],["c","freq",{"value":7,"displayValue":"7★"}],
                  ["d","freq",{"reading":"でぃー","frequency":{"value":3}}],["e","weird",1]]"#
                 .as_bytes(),
-        )
-        .unwrap();
+            &Cancel::new(),
+        ));
         let f: Vec<(i64, Option<String>)> = m
             .iter()
             .filter_map(|(_, x)| match x {
@@ -610,15 +748,23 @@ mod tests {
             ]
         );
         assert_eq!(m.len(), 4, "unknown modes are skipped");
+        let flat = all(parse_meta_bank(
+            r#"[["猫","freq",{"reading":"ねこ","value":100}]]"#.as_bytes(),
+            &Cancel::new(),
+        ));
+        assert!(
+            matches!(&flat[0].1, Meta::Frequency(f) if f.reading.as_deref() == Some("ねこ") && f.value == 100),
+            "{flat:?}"
+        );
     }
 
     #[test]
     fn pitch_and_ipa() {
-        let m = parse_meta_bank(
+        let m = all(parse_meta_bank(
             r#"[["箸","pitch",{"reading":"はし","pitches":[{"position":1,"nasal":2,"devoice":[1],"tags":["n"]},{"position":"LHH"}]}],
                  ["箸","ipa",{"reading":"はし","transcriptions":[{"ipa":"ha̠ɕi","tags":[]}]}]]"#.as_bytes(),
-        )
-        .unwrap();
+            &Cancel::new(),
+        ));
         let Meta::Pitch { pitches, .. } = &m[0].1 else {
             panic!()
         };
@@ -633,21 +779,44 @@ mod tests {
 
     #[test]
     fn kanji_and_tags() {
-        let k = parse_kanji(
+        let k = all(parse_kanji(
             r#"[["日","ニチ ジツ","ひ -び","jouyou",["day","sun"],{"strokes":"4","grade":"1"}]]"#
                 .as_bytes(),
             3,
-        )
-        .unwrap();
+            &Cancel::new(),
+        ));
         assert_eq!(k[0].meanings, ["day", "sun"]);
         assert!(
             k[0].stats
                 .contains(&("strokes".to_string(), "4".to_string()))
         );
-        let t =
-            parse_tags(r#"[["v5k","partOfSpeech",-3,"Godan verb with 'ku' ending",0]]"#.as_bytes())
-                .unwrap();
+        let t = all(parse_tags(
+            r#"[["v5k","partOfSpeech",-3,"Godan verb with 'ku' ending",0],[""]]"#.as_bytes(),
+            &Cancel::new(),
+        ));
         assert_eq!((t[0].category.as_str(), t[0].order), ("partOfSpeech", -3));
+        assert_eq!(t.len(), 1, "a tag without a name is skipped");
+    }
+
+    #[test]
+    fn a_malformed_kanji_row_or_title_does_not_stop_the_import() {
+        let k = parse_kanji(
+            r#"[["日","nichi","hi","jouyou",["day","","sun"],{"strokes":"4"}],
+                [123,"","","",["number as character"],{}],
+                ["x","","","","meanings-not-an-array",{}],
+                ["𠮟","","","",["異体字",""],{}],
+                ["y","","","",[],"stats-as-string"]]"#
+                .as_bytes(),
+            3,
+            &Cancel::new(),
+        );
+        let k = all(k);
+        let characters: Vec<&str> = k.iter().map(|k| k.character.as_str()).collect();
+        assert_eq!(characters, ["日", "𠮟", "y"]);
+        let index =
+            parse_index(b"{\"title\":\"bad\xff\xfe title\",\"format\":3,\"revision\":\"t\"}")
+                .unwrap();
+        assert_eq!(index.title, "bad\u{fffd}\u{fffd} title");
     }
 
     // T-DIC-015

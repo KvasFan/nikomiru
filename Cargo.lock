@@ -2010,6 +2010,7 @@ dependencies = [
  "wayland-protocols-plasma",
  "wayland-protocols-wlr",
  "winit",
+ "zip",
 ]
 
 [[package]]
@@ -2130,6 +2131,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "unic-langid",
+ "zip",
 ]
 
 [[package]]

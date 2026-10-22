@@ -5,6 +5,7 @@
 //! Writes are atomic and the file is readable only by the user (0600).
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,8 @@ pub struct Config {
     pub subtitles: SubtitlesConfig,
     /// `[lookup]`.
     pub lookup: LookupConfig,
+    /// `[popup]`.
+    pub popup: PopupConfig,
     /// `[paths]`.
     pub paths: PathsConfig,
     /// `[shortcuts]`: action → keys, only for the bindings changed by the user
@@ -161,6 +164,57 @@ impl Default for LookupConfig {
     }
 }
 
+/// `[popup]` (POP-006): the largest dictionary popup, in points. A popup is
+/// this wide and as tall as its content up to this height; the window can make
+/// it smaller.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PopupConfig {
+    /// Width, within [`PopupConfig::WIDTHS`].
+    pub max_width: f64,
+    /// Height, within [`PopupConfig::HEIGHTS`].
+    pub max_height: f64,
+    /// Keys this version does not know.
+    #[serde(flatten)]
+    pub other: toml::Table,
+}
+
+impl PopupConfig {
+    /// The widths a popup can have: narrower, a glossary line holds a few
+    /// words; no screen is wider.
+    pub const WIDTHS: RangeInclusive<f64> = 240.0..=4096.0;
+    /// The heights a popup can have: lower, it shows less than a headword
+    /// and its first line.
+    pub const HEIGHTS: RangeInclusive<f64> = 120.0..=4096.0;
+
+    /// A size brought within [`Self::WIDTHS`] and [`Self::HEIGHTS`]; a
+    /// value that is not a number takes the default.
+    pub fn bounded(width: f64, height: f64) -> (f64, f64) {
+        let defaults = Self::default();
+        let fit = |value: f64, range: &RangeInclusive<f64>, default: f64| {
+            if value.is_finite() {
+                value.clamp(*range.start(), *range.end())
+            } else {
+                default
+            }
+        };
+        (
+            fit(width, &Self::WIDTHS, defaults.max_width),
+            fit(height, &Self::HEIGHTS, defaults.max_height),
+        )
+    }
+}
+
+impl Default for PopupConfig {
+    fn default() -> Self {
+        Self {
+            max_width: 560.0,
+            max_height: 500.0,
+            other: toml::Table::new(),
+        }
+    }
+}
+
 /// `[paths]`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -206,6 +260,7 @@ impl Default for Config {
             player: PlayerConfig::default(),
             subtitles: SubtitlesConfig::default(),
             lookup: LookupConfig::default(),
+            popup: PopupConfig::default(),
             paths: PathsConfig::default(),
             shortcuts: BTreeMap::new(),
             other: toml::Table::new(),
@@ -222,6 +277,8 @@ impl Config {
         if !(8.0..=200.0).contains(&c.subtitles.font_size) {
             c.subtitles.font_size = 36.0;
         }
+        (c.popup.max_width, c.popup.max_height) =
+            PopupConfig::bounded(c.popup.max_width, c.popup.max_height);
         Ok(c)
     }
 
@@ -257,6 +314,8 @@ impl Config {
         let mut out: Vec<String> = self.other.keys().cloned().collect();
         out.extend(self.general.other.keys().map(|k| format!("general.{k}")));
         out.extend(self.player.other.keys().map(|k| format!("player.{k}")));
+        out.extend(self.lookup.other.keys().map(|k| format!("lookup.{k}")));
+        out.extend(self.popup.other.keys().map(|k| format!("popup.{k}")));
         out.extend(self.paths.other.keys().map(|k| format!("paths.{k}")));
         out.extend(
             self.subtitles
@@ -377,6 +436,36 @@ play_pause = ["Space"]
         assert_eq!(c.lookup.max_results, 50);
         assert!(c.lookup.hover_without_modifier && c.lookup.resume_on_leave);
         assert_eq!(Config::default().lookup.max_results, 10);
+    }
+
+    // T-POP-006
+    #[test]
+    fn popup_sizes_have_defaults_and_bounds() {
+        let size = |text: &str| {
+            let c = Config::from_toml(text).unwrap();
+            (c.popup.max_width, c.popup.max_height)
+        };
+        assert_eq!(size(""), (560.0, 500.0));
+        // whole numbers, as people write them
+        assert_eq!(
+            size("[popup]\nmax_width = 700\nmax_height = 320"),
+            (700.0, 320.0)
+        );
+        assert_eq!(
+            size("[popup]\nmax_width = 10\nmax_height = 100000.5"),
+            (240.0, 4096.0)
+        );
+        // TOML has floats that are not numbers
+        assert_eq!(
+            size("[popup]\nmax_width = nan\nmax_height = -inf"),
+            (560.0, 500.0)
+        );
+        assert_eq!(PopupConfig::bounded(f64::INFINITY, 0.0), (560.0, 120.0));
+        let c =
+            Config::from_toml("[popup]\nmax_width = 600\nlater = 1\n[lookup]\nlater = 2").unwrap();
+        assert_eq!(c.unknown_keys(), ["lookup.later", "popup.later"]);
+        let again = Config::from_toml(&toml::to_string_pretty(&c).unwrap()).unwrap();
+        assert_eq!(again, c);
     }
 
     #[test]

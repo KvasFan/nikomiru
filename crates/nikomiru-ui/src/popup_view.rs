@@ -550,14 +550,292 @@ pub fn content(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use nikomiru_dict::lookup::{Dictionary, Lookup, Options};
     use nikomiru_dict::memory::MemStore;
+    use nikomiru_dict::store::{DictStore, RedbStore};
+    use nikomiru_dict::structured::Target;
+    use nikomiru_dict::style::{self, Length, ListMarker, Style};
     use nikomiru_dict::yomitan::{Frequency, Meta, Pitch, Term};
 
     use super::*;
+
+    /// `mini-ja` (TEST §4.3) as the app has it: its source folder zipped and
+    /// imported by the real importer, then looked up with its tags, media and
+    /// styles.
+    pub(crate) struct MiniJa {
+        _dir: tempfile::TempDir,
+        store: Arc<RedbStore>,
+        lookup: Lookup,
+    }
+
+    fn files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    pub(crate) fn mini_ja() -> MiniJa {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/dicts/mini-ja");
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("mini-ja.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let mut found = Vec::new();
+        files(&source, &mut found);
+        found.sort();
+        for f in found {
+            let name = f
+                .strip_prefix(&source)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&std::fs::read(&f).unwrap()).unwrap();
+        }
+        zip.finish().unwrap();
+        let imported = nikomiru_dict::import::import(
+            &zip_path,
+            &dir.path().join("dicts"),
+            &nikomiru_core::Cancel::new(),
+            |_| {},
+        )
+        .unwrap();
+        let store =
+            Arc::new(RedbStore::open(&imported.dir.join(nikomiru_dict::import::DB_FILE)).unwrap());
+        let lookup = Lookup::new(
+            vec![Dictionary {
+                id: imported.id,
+                name: store.info().index.title.clone(),
+                store: store.clone(),
+            }],
+            "ja",
+        );
+        MiniJa {
+            _dir: dir,
+            store,
+            lookup,
+        }
+    }
+
+    impl MiniJa {
+        /// The popup content of `query`, built as the app's lookup thread
+        /// builds it.
+        pub(crate) fn content(&self, query: &str) -> Content {
+            let entries = self.lookup.lookup(query, Options::default()).unwrap();
+            let info = self.store.info();
+            let dicts = [DictView {
+                name: info.index.title.clone(),
+                collapse: Collapse::Automatic,
+                sheet: Sheet::parse(&info.styles),
+            }];
+            let tags = |_: usize, name: &str| self.store.tag(name).ok().flatten();
+            let media = |_: usize, path: &str| self.store.media(path).ok().flatten();
+            content(&entries, &[], &dicts, &tags, &media)
+        }
+    }
+
+    /// What only a dropped tag, attribute or address of the hostile entry
+    /// could bring into the view model.
+    const HOSTILE: [&str; 7] = [
+        "alert(",
+        "steal(",
+        "evil.example",
+        "javascript:",
+        "<script",
+        "url(",
+        "onclick",
+    ];
+
+    /// Panics unless every node of `content` is one the allowlist lets
+    /// through (POP-009…POP-011, DIC-035), whatever the dictionary wrote.
+    pub(crate) fn assert_allowlisted(content: &Content) {
+        for e in &content.entries {
+            for section in &e.sections {
+                for g in &section.glossaries {
+                    blocks_allowlisted(&g.blocks);
+                }
+            }
+        }
+        let json = serde_json::to_string(content).unwrap();
+        for bad in HOSTILE {
+            assert!(!json.contains(bad), "{bad} in {json}");
+        }
+    }
+
+    fn blocks_allowlisted(blocks: &[Block]) {
+        for b in blocks {
+            match b {
+                Block::Flow { runs } => runs_allowlisted(runs),
+                Block::Box { s, blocks } => {
+                    assert_safe_style(s);
+                    blocks_allowlisted(blocks);
+                }
+                Block::List {
+                    s, items, markers, ..
+                } => {
+                    assert_safe_style(s);
+                    markers.iter().flatten().for_each(assert_safe_marker);
+                    items.iter().for_each(|item| blocks_allowlisted(item));
+                }
+                Block::Table { s, columns, rows } => {
+                    assert_safe_style(s);
+                    for cell in rows.iter().flatten() {
+                        assert_safe_style(&cell.s);
+                        assert!(
+                            (1..=64).contains(&cell.colspan) && (1..=64).contains(&cell.rowspan)
+                        );
+                        assert!(cell.col + cell.colspan <= *columns);
+                        blocks_allowlisted(&cell.blocks);
+                    }
+                }
+                Block::Details {
+                    summary, blocks, ..
+                } => {
+                    runs_allowlisted(summary);
+                    blocks_allowlisted(blocks);
+                }
+                Block::Pairs { .. } => {}
+            }
+        }
+    }
+
+    fn runs_allowlisted(runs: &[Run]) {
+        for r in runs {
+            match r {
+                Run::Text { s, .. } | Run::Ruby { s, .. } => assert_safe_style(s),
+                Run::Link { target, s, .. } => {
+                    assert_safe_style(s);
+                    match target {
+                        Target::Lookup(text) => assert!(!text.is_empty()),
+                        Target::External(url) => assert!(crate::is_web_address(url), "{url}"),
+                    }
+                }
+                Run::Image { image } => {
+                    assert_eq!(
+                        structured::media_path(&image.path).as_deref(),
+                        Some(image.path.as_str()),
+                        "an image is a path inside the dictionary"
+                    );
+                    if let Some(p) = &image.pixels {
+                        assert_eq!(p.rgba.len(), p.size[0] * p.size[1] * 4, "decoded RGBA");
+                        assert!(p.size[0] <= 1280 && p.size[1] <= 1280);
+                    }
+                }
+                Run::Br => {}
+            }
+        }
+    }
+
+    /// The bounds `nikomiru_dict::style` puts on every value it accepts.
+    fn assert_safe_style(s: &Style) {
+        let length = |l: Option<Length>| match l {
+            Some(Length::Em(v)) => assert!((0.0..=100.0).contains(&v), "{v} em"),
+            Some(Length::Px(v)) => assert!((0.0..=1000.0).contains(&v), "{v} px"),
+            None => {}
+        };
+        if let Some(scale) = s.font_scale {
+            assert!((0.3..=4.0).contains(&scale), "font scale {scale}");
+        }
+        for sides in [s.margin, s.padding] {
+            for l in [sides.top, sides.right, sides.bottom, sides.left] {
+                length(l);
+            }
+        }
+        length(s.border_width);
+        length(s.border_radius);
+        if let Some(m) = &s.list_marker {
+            assert_safe_marker(m);
+        }
+    }
+
+    fn assert_safe_marker(m: &ListMarker) {
+        if let ListMarker::Text(t) = m {
+            assert!(t.chars().count() <= 6 && !t.chars().any(char::is_control));
+        }
+    }
+
+    fn images(blocks: &[Block], out: &mut Vec<Image>) {
+        for b in blocks {
+            match b {
+                Block::Flow { runs } | Block::Details { summary: runs, .. } => {
+                    out.extend(runs.iter().filter_map(|r| match r {
+                        Run::Image { image } => Some(image.clone()),
+                        _ => None,
+                    }));
+                }
+                Block::Box { blocks, .. } => images(blocks, out),
+                Block::List { items, .. } => items.iter().for_each(|i| images(i, out)),
+                Block::Table { rows, .. } => {
+                    rows.iter().flatten().for_each(|c| images(&c.blocks, out));
+                }
+                Block::Pairs { .. } => {}
+            }
+        }
+    }
+
+    // T-SEC-001: the hostile entry of mini-ja (a `<script>`, an `onclick`, a
+    // remote image, a `javascript:` link) through the real import, lookup and
+    // content builder
+    #[test]
+    fn dictionary_content_becomes_only_allowlisted_view_model_nodes() {
+        let mini = mini_ja();
+        let danger = mini.content("危険");
+        assert_eq!(danger.entries.len(), 1);
+        let entry = &danger.entries[0];
+        assert_eq!(entry.expression, "危険");
+        assert_eq!(
+            entry.sections[0].glossaries[0].blocks,
+            [Block::Flow {
+                runs: vec![
+                    Run::Text {
+                        t: "danger".into(),
+                        s: Style {
+                            color: style::color("red"),
+                            ..Style::default()
+                        },
+                    },
+                    Run::Link {
+                        t: "click".into(),
+                        target: Target::Lookup("click".into()),
+                        s: Style::default(),
+                    },
+                ]
+            }],
+            "the span's text and colour and the link's text, nothing else"
+        );
+        assert_allowlisted(&danger);
+
+        // an image is a path inside the dictionary, decoded from its media
+        let kanji = mini.content("漢字");
+        assert_allowlisted(&kanji);
+        let mut found = Vec::new();
+        for g in kanji
+            .entries
+            .iter()
+            .flat_map(|e| &e.sections)
+            .flat_map(|s| &s.glossaries)
+        {
+            images(&g.blocks, &mut found);
+        }
+        assert!(
+            found
+                .iter()
+                .any(|i| i.path == "img/a.png"
+                    && i.pixels.as_ref().is_some_and(|p| p.size == [2, 2])),
+            "{found:?}"
+        );
+    }
 
     fn term(expression: &str, reading: &str, tags: &str, gloss: &str) -> Term {
         Term {

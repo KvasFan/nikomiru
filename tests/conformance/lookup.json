@@ -1,6 +1,6 @@
 {
   "provenance_commit": "ac8034e",
-  "conventions": "All strings are real Unicode characters (the C++ \\x.. UTF-8 escapes are decoded). All lengths count Unicode code points. Dictionaries: \"dictionaries\" maps a dictionary id to a Yomitan dictionary as Nikomiru imports it (DIC-001): \"index\" is index.json, the other keys are the banks (term_bank = term_bank_1.json, and so on); empty banks are omitted. Term rows are [expression, reading, definitionTags, rules, score, glossary, sequence, termTags]. The ids are local to this file; the name a dictionary shows (and the name Fushi compares) is index.title, which can repeat across dictionaries of different cases but never inside one case. The Fushi tests build these dictionaries in code; where Fushi uses a simple (MDX/StarDict/DSL) dictionary, which stores an empty reading and the rules \"*\", it is written here as a Yomitan dictionary with empty readings and no rules on any entry, which LKP-023 (BUG-2543) treats the same way; the case note says so. Every dictionary of a case is used in every role its banks provide: term rows answer lookups, term_meta rows with mode \"freq\" give frequencies, \"pitch\" and \"ipa\" rows give pitch data, kanji rows answer kanji lookups (the Fushi tests register one imported directory in several roles in the same way). An empty reading in a term row means that the reading is the expression (Yomitan convention; Fushi's importer stores the expression), so such a row is reported and grouped with reading = expression. \"lookup\" cases: \"language\" selects the deinflection tables assets/transforms/<language>.json (\"en\" also loads en_irregular.json, listed right after en.json in manifest.json; \"ko\" uses ko.json) and the preprocessor chain of that study language (LKP-011, LKP-012; \"ko\" includes the Korean jamo disassembly and the reassembly of deinflected forms, BUG-2148). \"dictionaries\" lists the case dictionaries in user priority order (DIC-031): this is the order of glossary blocks inside a group (LKP-033, LKP-036), the order of the frequency dictionaries for sorting (LKP-034 criterion 5) and the dictionary priority of LKP-034 criterion 6, where a result ranks by the first listed dictionary that gives it a glossary. \"disabled\" lists dictionaries that are imported but disabled (DIC-032): they are not queried at all. \"query\" is the string handed to the lookup engine, i.e. the text from the start point as Fushi's Lookup::lookup receives it; the engine applies LKP-003 and LKP-004 (candidates are the prefixes of the first 16 code points). \"options.max_results\" is the budget of headword groups (LKP-035): the value the Fushi test uses, or 10 when it uses none. \"expected.entries\" describes headword groups (LKP-036) and each object holds only the fields that are checked. \"order\": \"exact\" = the returned groups are exactly these, in this order; \"prefix\" = the first groups are these, in this order; \"any\" = each object matches some returned group. \"absent\" lists objects (expression, optionally reading and matched) that must match no returned group; \"count\" is the exact number of returned groups; \"best_length\" is the longest matched text of the returned groups (0 when there is none); \"import_counts\" gives, per dictionary id, the rows of the import: terms, freq (term_meta \"freq\" rows), pitch (term_meta \"pitch\" and \"ipa\" rows) and kanji. Entry fields: \"expression\"; \"reading\" (the group reading, see above for empty readings); \"matched\" (the prefix of the query that matched, in its original spelling); \"trace\" (names of the deinflection transforms in removal order, outermost suffix first, LKP-024; the \"name\" of the transform, so every kansai-ben transform appears as \"kansai-ben\"; when the entry was reached through a formOf redirect, LKP-032, the rule strings of the redirect follow the deinflection names); \"trace_contains\" / \"trace_excludes\" (names that must / must not be in the trace); \"trace_display\" (the deinflection tags shown in the popup: the trace reversed, each with the \"description\" of its transform as written in the tables, untranslated; when the trace is empty and the matched text differs from the deinflected text that was looked up, one tag \"<matched> → <deinflected>\" with an empty description, as Fushi does for a pure text variant; no tag when they are equal or when the deinflected text is empty); \"steps\" (number of preprocessors that changed the text of the winning variant, LKP-010); \"dictionaries\" (dictionary id of each glossary block, one block per term row, in order); \"glossaries\" (the glossary array of each of those term rows, exactly as in the bank, same order); \"frequencies\" (one object per frequency dictionary in dictionary order: \"values\" are the display strings of its records for this headword in bank order, displayValue when given, otherwise the number (LKP-040); a record whose reading ({reading, frequency} form) differs from the term reading is dropped; identical (dictionary, values) objects of the rows of one group appear once, LKP-036); \"pitches\" (one object per pitch dictionary in dictionary order, with \"positions\" (numeric downstep positions), \"patterns\" (accents given as a string, e.g. \"heiban\") and \"transcriptions\" (IPA): the records of one dictionary for the headword are flattened in bank order, an accent equal to an earlier one in position, pattern, nasal and devoice or a repeated transcription is dropped (BUG-2152), records whose reading differs from the term reading are dropped, and identical objects of the rows of one group appear once, LKP-036). Glossary blocks that the Fushi popup hides as redirect-only are not listed: a row's glossary is hidden when its definition or term tags contain the word \"redirect\" or \"redirected\", or when its visible text (strings and the content/text of structured-content nodes, HTML tags removed) contains \"redirected from\" (any case), or a node whose whole visible text is \"redirect\" while the tags contain \"non-lemma\", and no top-level item of the glossary array has visible text without such a marker (BUG-2566); formOf redirects themselves are resolved by the engine (LKP-032). When LKP-034 leaves groups tied, no case depends on their relative order. \"kanji\" cases: \"query\" is one character looked up in the kanji banks (LKP-037). \"expected.entries\" has one object per kanji dictionary that has the character, in dictionary order: \"onyomi\" and \"kunyomi\" are the strings of the kanji bank (space-separated readings), \"meanings\" the list of the bank, \"radical\" and \"strokes\" (an integer) come from the stats keys \"radical\" and \"strokes\", and \"stats\" holds the other stats key/value pairs. \"dictionary_types\" gives the type of each listed dictionary as DIC-015 detects it, as a list (\"term\", \"kanji\", or both for a term dictionary with kanji banks). \"deinflect\" cases run the deinflector alone (LKP-020…LKP-022) with the real tables of \"language\" on \"input\": every object of \"present\" must be among the produced forms (\"text\", and \"trace\" = transform names in removal order when given; the input itself is a form with an empty trace) and no object of \"absent\" may be. \"frequency\" cases have no lookup. \"groups\" is the frequency data of one entry, one object per dictionary record group with \"dictionary\" (a display name) and \"values\" ({value, display}; display \"\" means none). \"expected.harmonic\" is the harmonic rank of LKP-040 (the Anki field {frequency-harmonic-rank}): for each dictionary (groups with the same name are one dictionary), the first value whose rank is > 0, where the rank of a value is the leading integer of its display string when that is > 0 (DIC-003), otherwise the value when > 0; then floor(n / Σ 1/rank) computed exactly (no floating-point error, so [10, 15] gives 12), and 9999999 when no dictionary has a rank. \"expected.html\" is the Anki field {frequencies} of ANK-025: <ul style=\"text-align: left;\"> followed by <li>D: v</li> for every value of every group in order (v = display, or the value when display is empty) and </ul>, or \"\" when there is no value. \"pitch\" cases have no lookup. \"expected.morae\": the reading split into morae, a small kana (ぁぃぅぇぉゃゅょゎ ァィゥェォャュョヮ) joining the previous mora (LKP-041). \"expected.high_low\": for each distinct entry of \"positions\", in input order, one H or L per mora plus one for the following particle, as Yomitan isMoraPitchHigh (position 0: mora 0 low, the rest high; position 1: mora 0 high, the rest low; position n > 1: high from mora 1 to mora n - 1); a reading without morae gives no string. \"expected.rows\": the pitch rows of the popup (LKP-043) for the per-dictionary \"groups\" (positions, patterns, transcriptions) of one entry with \"options.dedupe_pitch\": groups whose payload is identical (positions compared as a sorted list, patterns and transcriptions as lists) first become one row that lists every source dictionary in first-appearance order and keeps the first group's payload; the label of such a row is \"pitch accent · N\" with N its number of dictionaries. Then, when dedupe_pitch is true, rows are walked in order and every position, pattern or transcription already shown by an earlier row is removed, a row left with nothing being dropped (BUG-2397); when it is false nothing more happens. \"provenance.test\" names the Fushi test: for C++ tests the assertion label (or the case comment), for Dart tests \"group › test\", for tests that run a JavaScript harness the case of that harness. \"divergence\" marks a case where Nikomiru's requirement differs from Fushi: \"expected\" follows the requirement and \"fushi_expected\" is what Fushi gives for the same input, in the same shape. \"skip\" marks a test that cannot be expressed (source-level guards, Fushi storage or UI details, MDX-only behaviour, hand-built engine states no lookup can produce); its other fields are placeholders. Every non-skipped case was checked by running Fushi's own code at the provenance commit (the C++ engine, importer and deinflector, the Dart result builders and popup.js) on these dictionaries: \"expected\" matches Fushi except where a divergence is declared, and then \"fushi_expected\" is Fushi's output. \"expected\" was also checked against a model of the Nikomiru requirements (LKP-034 sorting with dictionary priority, LKP-035 budget in groups, LKP-036 grouping). The notes explain every translation of a Fushi fixture.",
+  "conventions": "All strings are real Unicode characters (the C++ \\x.. UTF-8 escapes are decoded). All lengths count Unicode code points. Dictionaries: \"dictionaries\" maps a dictionary id to a Yomitan dictionary as Nikomiru imports it (DIC-001): \"index\" is index.json, the other keys are the banks (term_bank = term_bank_1.json, and so on); empty banks are omitted. Term rows are [expression, reading, definitionTags, rules, score, glossary, sequence, termTags]. The ids are local to this file; the name a dictionary shows (and the name Fushi compares) is index.title, which can repeat across dictionaries of different cases but never inside one case. The Fushi tests build these dictionaries in code; where Fushi uses a simple (MDX/StarDict/DSL) dictionary, which stores an empty reading and the rules \"*\", it is written here as a Yomitan dictionary with empty readings and no rules on any entry, which LKP-023 (BUG-2543) treats the same way; the case note says so. Every dictionary of a case is used in every role its banks provide: term rows answer lookups, term_meta rows with mode \"freq\" give frequencies, \"pitch\" and \"ipa\" rows give pitch data, kanji rows answer kanji lookups (the Fushi tests register one imported directory in several roles in the same way). An empty reading in a term row means that the reading is the expression (Yomitan convention; Fushi's importer stores the expression), so such a row is reported and grouped with reading = expression. \"lookup\" cases: \"language\" selects the deinflection tables assets/transforms/<language>.json (\"en\" also loads en_irregular.json, listed right after en.json in manifest.json; \"ko\" uses ko.json) and the preprocessor chain of that study language (LKP-011, LKP-012; \"ko\" includes the Korean jamo disassembly and the reassembly of deinflected forms, BUG-2148). \"dictionaries\" lists the case dictionaries in user priority order (DIC-031): this is the order of glossary blocks inside a group (LKP-033, LKP-036), the order of the frequency dictionaries for sorting (LKP-034 criterion 5) and the dictionary priority of LKP-034 criterion 6, where a result ranks by the first listed dictionary that gives it a glossary. \"disabled\" lists dictionaries that are imported but disabled (DIC-032): they are not queried at all. \"query\" is the string handed to the lookup engine, i.e. the text from the start point as Fushi's Lookup::lookup receives it; the engine applies LKP-003 and LKP-004 (candidates are the prefixes of the first 16 code points). \"options.max_results\" is the budget of headword groups (LKP-035): the value the Fushi test uses, or 10 when it uses none. \"expected.entries\" describes headword groups (LKP-036) and each object holds only the fields that are checked. \"order\": \"exact\" = the returned groups are exactly these, in this order; \"prefix\" = the first groups are these, in this order; \"any\" = each object matches some returned group. \"absent\" lists objects (expression, optionally reading and matched) that must match no returned group; \"count\" is the exact number of returned groups; \"best_length\" is the longest matched text of the returned groups (0 when there is none); \"import_counts\" gives, per dictionary id, the rows of the import: terms, freq (term_meta \"freq\" rows), pitch (term_meta \"pitch\" and \"ipa\" rows) and kanji. Entry fields: \"expression\"; \"reading\" (the group reading, see above for empty readings); \"matched\" (the prefix of the query that matched, in its original spelling); \"trace\" (names of the deinflection transforms in removal order, outermost suffix first, LKP-024; the \"name\" of the transform, so every kansai-ben transform appears as \"kansai-ben\"; when the entry was reached through a formOf redirect, LKP-032, the rule strings of the redirect follow the deinflection names); \"trace_contains\" / \"trace_excludes\" (names that must / must not be in the trace); \"trace_display\" (the deinflection tags shown in the popup: the trace reversed, each with the \"description\" of its transform as written in the tables, untranslated; when the trace is empty and the matched text differs from the deinflected text that was looked up, one tag \"<matched> → <deinflected>\" with an empty description, as Fushi does for a pure text variant; no tag when they are equal or when the deinflected text is empty); \"steps\" (number of preprocessors that changed the text of the winning variant, LKP-010); \"dictionaries\" (dictionary id of each glossary block, one block per term row, in order); \"glossaries\" (the glossary array of each of those term rows, exactly as in the bank, same order); \"frequencies\" (one object per frequency dictionary in dictionary order: \"values\" are the display strings of its records for this headword in bank order, displayValue when given, otherwise the number (LKP-040); a record whose reading ({reading, frequency} form) differs from the term reading is dropped; identical (dictionary, values) objects of the rows of one group appear once, LKP-036); \"pitches\" (one object per pitch dictionary in dictionary order, with \"positions\" (numeric downstep positions), \"patterns\" (accents given as a string, e.g. \"heiban\") and \"transcriptions\" (IPA): the records of one dictionary for the headword are flattened in bank order, an accent equal to an earlier one in position, pattern, nasal and devoice or a repeated transcription is dropped (BUG-2152), records whose reading differs from the term reading are dropped, and identical objects of the rows of one group appear once, LKP-036). Glossary blocks that the Fushi popup hides as redirect-only are not listed: a row's glossary is hidden when its definition or term tags contain the word \"redirect\" or \"redirected\", or when its visible text (strings and the content/text of structured-content nodes, HTML tags removed) contains \"redirected from\" (any case), or a node whose whole visible text is \"redirect\" while the tags contain \"non-lemma\", and no top-level item of the glossary array has visible text without such a marker (BUG-2566); formOf redirects themselves are resolved by the engine (LKP-032). When LKP-034 leaves groups tied, no case depends on their relative order. \"kanji\" cases: \"query\" is one character looked up in the kanji banks (LKP-037). \"expected.entries\" has one object per kanji dictionary that has the character, in dictionary order: \"onyomi\" and \"kunyomi\" are the strings of the kanji bank (space-separated readings), \"meanings\" the list of the bank, \"radical\" and \"strokes\" (an integer) come from the stats keys \"radical\" and \"strokes\", and \"stats\" holds the other stats key/value pairs. \"dictionary_types\" gives the type of each listed dictionary as DIC-015 detects it, as a list (\"term\", \"kanji\", or both for a term dictionary with kanji banks). \"import_titles\" gives, per dictionary id, the title read back from the imported dictionary (index.title), which must be the one of its index.json byte for byte. \"deinflect\" cases run the deinflector alone (LKP-020…LKP-022) with the real tables of \"language\" on \"input\": every object of \"present\" must be among the produced forms (\"text\", and \"trace\" = transform names in removal order when given; the input itself is a form with an empty trace) and no object of \"absent\" may be. \"frequency\" cases have no lookup. \"groups\" is the frequency data of one entry, one object per dictionary record group with \"dictionary\" (a display name) and \"values\" ({value, display}; display \"\" means none). \"expected.harmonic\" is the harmonic rank of LKP-040 (the Anki field {frequency-harmonic-rank}): for each dictionary (groups with the same name are one dictionary), the first value whose rank is > 0, where the rank of a value is the leading integer of its display string when that is > 0 (DIC-003), otherwise the value when > 0; then floor(n / Σ 1/rank) computed exactly (no floating-point error, so [10, 15] gives 12), and 9999999 when no dictionary has a rank. \"expected.html\" is the Anki field {frequencies} of ANK-025: <ul style=\"text-align: left;\"> followed by <li>D: v</li> for every value of every group in order (v = display, or the value when display is empty) and </ul>, or \"\" when there is no value. \"pitch\" cases have no lookup. \"expected.morae\": the reading split into morae, a small kana (ぁぃぅぇぉゃゅょゎ ァィゥェォャュョヮ) joining the previous mora (LKP-041). \"expected.high_low\": for each distinct entry of \"positions\", in input order, one H or L per mora plus one for the following particle, as Yomitan isMoraPitchHigh (position 0: mora 0 low, the rest high; position 1: mora 0 high, the rest low; position n > 1: high from mora 1 to mora n - 1); a reading without morae gives no string. \"expected.rows\": the pitch rows of the popup (LKP-043) for the per-dictionary \"groups\" (positions, patterns, transcriptions) of one entry with \"options.dedupe_pitch\": groups whose payload is identical (positions compared as a sorted list, patterns and transcriptions as lists) first become one row that lists every source dictionary in first-appearance order and keeps the first group's payload; the label of such a row is \"pitch accent · N\" with N its number of dictionaries. Then, when dedupe_pitch is true, rows are walked in order and every position, pattern or transcription already shown by an earlier row is removed, a row left with nothing being dropped (BUG-2397); when it is false nothing more happens. \"provenance.test\" names the Fushi test: for C++ tests the assertion label (or the case comment), for Dart tests \"group › test\", for tests that run a JavaScript harness the case of that harness. \"divergence\" marks a case where Nikomiru's requirement differs from Fushi: \"expected\" follows the requirement and \"fushi_expected\" is what Fushi gives for the same input, in the same shape. \"known_failure\" ({owner, note}) marks a case that fails today because of the file named by \"owner\": the runner expects it to fail, and fails when it passes, so that the mark is removed. \"skip\" marks a test that cannot be expressed (source-level guards, Fushi storage or UI details, MDX-only behaviour, hand-built engine states no lookup can produce); its other fields are placeholders. Every non-skipped case was checked by running Fushi's own code at the provenance commit (the C++ engine, importer and deinflector, the Dart result builders and popup.js) on these dictionaries: \"expected\" matches Fushi except where a divergence is declared, and then \"fushi_expected\" is Fushi's output. \"expected\" was also checked against a model of the Nikomiru requirements (LKP-034 sorting with dictionary priority, LKP-035 budget in groups, LKP-036 grouping). The notes explain every translation of a Fushi fixture. The cases of format_v2_upstream_sync_test.cpp, dict_name_uaf_e2e_test.cpp and import_failure_boundary_test.cpp were added later from the assertions of those tests, without a run of Fushi's code: \"expected\" holds what the Fushi assertions check, and what the Nikomiru requirements fix where the assertions leave it open; the notes say which.",
   "dictionaries": {
     "ataru-jmdict": {
       "index": {
@@ -3417,6 +3417,1106 @@
           ],
           0,
           ""
+        ]
+      ]
+    },
+    "fv2-kanji-stats": {
+      "index": {
+        "title": "V2KanjiStats",
+        "format": 3,
+        "revision": "test"
+      },
+      "kanji_bank": [
+        [
+          "日",
+          "nichi jitsu",
+          "hi",
+          "jouyou",
+          [
+            "day",
+            "sun"
+          ],
+          {
+            "radical": "日",
+            "strokes": "4",
+            "jlpt": "4",
+            "grade": 8,
+            "freq": "1"
+          }
+        ]
+      ]
+    },
+    "fv2-terms": {
+      "index": {
+        "title": "V2ZstdTerms",
+        "format": 3,
+        "revision": "test"
+      },
+      "term_bank": [
+        [
+          "word0",
+          "word0",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 0 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word1",
+          "word1",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 1 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word2",
+          "word2",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 2 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word3",
+          "word3",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 3 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word4",
+          "word4",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 4 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word5",
+          "word5",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 5 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word6",
+          "word6",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 6 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word7",
+          "word7",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 7 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word8",
+          "word8",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 8 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word9",
+          "word9",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 9 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word10",
+          "word10",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 10 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word11",
+          "word11",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 11 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word12",
+          "word12",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 12 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word13",
+          "word13",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 13 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word14",
+          "word14",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 14 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word15",
+          "word15",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 15 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word16",
+          "word16",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 16 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word17",
+          "word17",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 17 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word18",
+          "word18",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 18 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word19",
+          "word19",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 19 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word20",
+          "word20",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 20 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word21",
+          "word21",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 21 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word22",
+          "word22",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 22 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word23",
+          "word23",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 23 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word24",
+          "word24",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 24 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word25",
+          "word25",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 25 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word26",
+          "word26",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 26 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word27",
+          "word27",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 27 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word28",
+          "word28",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 28 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word29",
+          "word29",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 29 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word30",
+          "word30",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 30 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word31",
+          "word31",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 31 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word32",
+          "word32",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 32 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word33",
+          "word33",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 33 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word34",
+          "word34",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 34 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word35",
+          "word35",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 35 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word36",
+          "word36",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 36 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word37",
+          "word37",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 37 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word38",
+          "word38",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 38 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word39",
+          "word39",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 39 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word40",
+          "word40",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 40 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word41",
+          "word41",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 41 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word42",
+          "word42",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 42 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word43",
+          "word43",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 43 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word44",
+          "word44",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 44 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word45",
+          "word45",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 45 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word46",
+          "word46",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 46 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word47",
+          "word47",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 47 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word48",
+          "word48",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 48 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word49",
+          "word49",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 49 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word50",
+          "word50",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 50 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word51",
+          "word51",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 51 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word52",
+          "word52",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 52 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word53",
+          "word53",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 53 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word54",
+          "word54",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 54 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word55",
+          "word55",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 55 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word56",
+          "word56",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 56 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word57",
+          "word57",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 57 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word58",
+          "word58",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 58 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word59",
+          "word59",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 59 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word60",
+          "word60",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 60 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word61",
+          "word61",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 61 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word62",
+          "word62",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 62 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ],
+        [
+          "word63",
+          "word63",
+          "",
+          "",
+          0,
+          [
+            "the shared common phrase describing entry number 63 with plenty of overlapping vocabulary for dictionary training"
+          ],
+          0,
+          ""
+        ]
+      ]
+    },
+    "fv2-pitch": {
+      "index": {
+        "title": "V2PitchPattern",
+        "format": 3,
+        "revision": "test"
+      },
+      "term_bank": [
+        [
+          "猫",
+          "ねこ",
+          "",
+          "",
+          0,
+          [
+            "cat"
+          ],
+          0,
+          ""
+        ]
+      ],
+      "term_meta_bank": [
+        [
+          "猫",
+          "pitch",
+          {
+            "reading": "ねこ",
+            "pitches": [
+              {
+                "position": "heiban"
+              },
+              {
+                "position": 2
+              }
+            ]
+          }
+        ]
+      ]
+    },
+    "fv2-score": {
+      "index": {
+        "title": "V2Score",
+        "format": 3,
+        "revision": "test"
+      },
+      "term_bank": [
+        [
+          "猫",
+          "ねこ",
+          "",
+          "",
+          1,
+          [
+            "cat-hira"
+          ],
+          0,
+          ""
+        ],
+        [
+          "猫",
+          "ネコ",
+          "",
+          "",
+          10,
+          [
+            "cat-kata"
+          ],
+          0,
+          ""
+        ]
+      ]
+    },
+    "fv2-freq": {
+      "index": {
+        "title": "V2FreqOrder",
+        "format": 3,
+        "revision": "test"
+      },
+      "term_bank": [
+        [
+          "猫",
+          "ねこ",
+          "",
+          "",
+          0,
+          [
+            "g-hira"
+          ],
+          0,
+          ""
+        ],
+        [
+          "猫",
+          "ネコ",
+          "",
+          "",
+          0,
+          [
+            "g-kata"
+          ],
+          0,
+          ""
+        ]
+      ],
+      "term_meta_bank": [
+        [
+          "猫",
+          "freq",
+          {
+            "reading": "ねこ",
+            "value": 100
+          }
+        ],
+        [
+          "猫",
+          "freq",
+          {
+            "reading": "ネコ",
+            "value": 9000
+          }
+        ]
+      ]
+    },
+    "fv2-freq-occurrence": {
+      "index": {
+        "title": "V2FreqOrder",
+        "format": 3,
+        "revision": "test",
+        "frequencyMode": "occurrence-based"
+      },
+      "term_bank": [
+        [
+          "猫",
+          "ねこ",
+          "",
+          "",
+          0,
+          [
+            "g-hira"
+          ],
+          0,
+          ""
+        ],
+        [
+          "猫",
+          "ネコ",
+          "",
+          "",
+          0,
+          [
+            "g-kata"
+          ],
+          0,
+          ""
+        ]
+      ],
+      "term_meta_bank": [
+        [
+          "猫",
+          "freq",
+          {
+            "reading": "ねこ",
+            "value": 100
+          }
+        ],
+        [
+          "猫",
+          "freq",
+          {
+            "reading": "ネコ",
+            "value": 9000
+          }
+        ]
+      ]
+    },
+    "dnu-a": {
+      "index": {
+        "title": "大修館 明鏡国語辞典（第二版）",
+        "format": 3,
+        "revision": "test"
+      },
+      "term_bank": [
+        [
+          "日本",
+          "日本",
+          "",
+          "",
+          0,
+          [
+            "Japan-A"
+          ],
+          0,
+          ""
+        ]
+      ]
+    },
+    "dnu-b": {
+      "index": {
+        "title": "ロシア語＝日本語辞典 Большой",
+        "format": 3,
+        "revision": "test"
+      },
+      "term_bank": [
+        [
+          "日本",
+          "日本",
+          "",
+          "",
+          0,
+          [
+            "Japan-B"
+          ],
+          0,
+          ""
+        ]
+      ]
+    },
+    "dnu-c": {
+      "index": {
+        "title": "café — Diccionario español",
+        "format": 3,
+        "revision": "test"
+      },
+      "term_bank": [
+        [
+          "日本",
+          "日本",
+          "",
+          "",
+          0,
+          [
+            "Japan-C"
+          ],
+          0,
+          ""
+        ]
+      ]
+    },
+    "ifb-kanji": {
+      "index": {
+        "title": "Boundary",
+        "format": 3,
+        "revision": "t"
+      },
+      "kanji_bank": [
+        [
+          "日",
+          "nichi",
+          "hi",
+          "jouyou",
+          [
+            "day",
+            "",
+            "sun"
+          ],
+          {
+            "strokes": "4"
+          }
+        ],
+        [
+          123,
+          "",
+          "",
+          "",
+          [
+            "number as character"
+          ],
+          {}
+        ],
+        [
+          "x",
+          "",
+          "",
+          "",
+          "meanings-not-an-array",
+          {}
+        ],
+        [
+          "𠮟",
+          "",
+          "",
+          "",
+          [
+            "異体字",
+            ""
+          ],
+          {}
+        ],
+        [
+          "y",
+          "",
+          "",
+          "",
+          [],
+          "stats-as-string"
         ]
       ]
     }
@@ -12460,6 +13560,489 @@
       "divergence": null,
       "skip": true,
       "note": "Source-level guards on popup.js."
+    },
+    {
+      "id": "fv2-a-kanji-stats",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "A: v2 marker + kanji stats (A.radical, A.strokes, A.stats count == 3, A.stats jlpt=4, A.stats grade=8, A.stats freq=1, A.stats no radical/strokes leak)",
+        "commit": "ac8034e"
+      },
+      "kind": "kanji",
+      "dictionaries": [
+        "fv2-kanji-stats"
+      ],
+      "query": "日",
+      "expected": {
+        "entries": [
+          {
+            "dictionary": "fv2-kanji-stats",
+            "character": "日",
+            "radical": "日",
+            "strokes": 4,
+            "stats": {
+              "jlpt": "4",
+              "grade": "8",
+              "freq": "1"
+            }
+          }
+        ]
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "Mixed string and number stats: radical and strokes go to their own fields, every other key stays in the stats, a number written as its JSON text. The v2 marker checks (A.marker v2 exists, A.marker v1 absent) are Fushi storage details."
+    },
+    {
+      "id": "fv2-b-marker-missing",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "B: marker missing -> not loaded (B.no marker -> not loaded)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [],
+      "query": "",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [],
+        "order": "any"
+      },
+      "divergence": null,
+      "skip": true,
+      "note": "Fushi's .fushidicts_2 completion marker: a dictionary folder without it is not loaded. Storage detail; a Nikomiru import is registered only after its folder is renamed into place (DIC-013, T-DIC-013)."
+    },
+    {
+      "id": "fv2-c-truncated-bloom",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "C: bloom.filter truncated -> empty filter, still queryable (C.truncated bloom -> query still works)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [],
+      "query": "",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [],
+        "order": "any"
+      },
+      "divergence": null,
+      "skip": true,
+      "note": "Fushi keeps its Bloom filter in its own bloom.filter file, which can be truncated alone. Nikomiru stores the filter inside the dictionary's redb file, written by the import's single transaction (DIC-013); a damaged dictionary file is hash_truncated_table_guard_test.cpp, in import.json."
+    },
+    {
+      "id": "fv2-d-glossary-word0",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "D: term glossary round trip (D.glossary word0 / D.reopen glossary word0)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "en",
+      "dictionaries": [
+        "fv2-terms"
+      ],
+      "query": "word0",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [
+          {
+            "expression": "word0",
+            "reading": "word0",
+            "glossaries": [
+              [
+                "the shared common phrase describing entry number 0 with plenty of overlapping vocabulary for dictionary training"
+              ]
+            ]
+          }
+        ],
+        "order": "prefix"
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "Fushi compresses glossaries with zstd, with a dictionary trained on them when there are enough; Nikomiru with lz4 (SPECIFICATION §6.5.3). Either way the glossary comes back exactly. The runner reads the store from its file after the import, as Fushi's reopen does."
+    },
+    {
+      "id": "fv2-d-glossary-word63",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "D: term glossary round trip (D.glossary word63 non-empty)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "en",
+      "dictionaries": [
+        "fv2-terms"
+      ],
+      "query": "word63",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [
+          {
+            "expression": "word63",
+            "reading": "word63",
+            "glossaries": [
+              [
+                "the shared common phrase describing entry number 63 with plenty of overlapping vocabulary for dictionary training"
+              ]
+            ]
+          }
+        ],
+        "order": "prefix"
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "Fushi compresses glossaries with zstd, with a dictionary trained on them when there are enough; Nikomiru with lz4 (SPECIFICATION §6.5.3). Either way the glossary comes back exactly. The runner reads the store from its file after the import, as Fushi's reopen does."
+    },
+    {
+      "id": "fv2-e-pitch-pattern",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "E: a pattern position does not kill the pitch record (E.accent count == 2, E.numeric position survives, E.pattern accent survives)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [
+        "fv2-pitch"
+      ],
+      "query": "猫",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [
+          {
+            "expression": "猫",
+            "reading": "ねこ",
+            "pitches": [
+              {
+                "dictionary": "fv2-pitch",
+                "positions": [
+                  2
+                ],
+                "patterns": [
+                  "heiban"
+                ],
+                "transcriptions": []
+              }
+            ]
+          }
+        ],
+        "order": "any"
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "One record holds an accent written as a pattern and one as a downstep number: both survive (LKP-041)."
+    },
+    {
+      "id": "fv2-f-score-descending",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "F: v2 term score stored, sorted descending (F.score-desc first, F.score-desc second)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [
+        "fv2-score"
+      ],
+      "query": "猫",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [
+          {
+            "expression": "猫",
+            "reading": "ネコ"
+          },
+          {
+            "expression": "猫",
+            "reading": "ねこ"
+          }
+        ],
+        "order": "exact"
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "Both readings tie on every sort key before the score (LKP-034 criteria 1-6), so the score decides (criterion 7), before the expression equal to the reading (criterion 8)."
+    },
+    {
+      "id": "fv2-f-primary-reading",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "F: primary_reading overrides everything (F.primary_reading first)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [],
+      "query": "",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [],
+        "order": "any"
+      },
+      "divergence": null,
+      "skip": true,
+      "note": "LookupOptions.primary_reading (a reading the caller already knows, which wins over every sort key) has no counterpart in Nikomiru's lookup (LKP-034)."
+    },
+    {
+      "id": "fv2-g-frequency-ascending",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "G: frequency order of a frequency dictionary, before truncation (G.auto ascending first, G.explicit ascending first)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [
+        "fv2-freq"
+      ],
+      "query": "猫",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [
+          {
+            "expression": "猫",
+            "reading": "ねこ",
+            "frequencies": [
+              {
+                "dictionary": "fv2-freq",
+                "values": [
+                  "100"
+                ]
+              }
+            ]
+          },
+          {
+            "expression": "猫",
+            "reading": "ネコ",
+            "frequencies": [
+              {
+                "dictionary": "fv2-freq",
+                "values": [
+                  "9000"
+                ]
+              }
+            ]
+          }
+        ],
+        "order": "exact"
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "The two readings tie on every sort key above frequency; the reading-scoped values decide, lowest first (rank-based, LKP-034 criterion 5). Fushi's explicit Ascending option is its default order. The records are written {reading, value}: Fushi reads that flat shape like Yomitan's {reading, frequency}."
+    },
+    {
+      "id": "fv2-g-frequency-descending",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "G: explicit descending order (G.explicit descending first)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [
+        "fv2-freq-occurrence"
+      ],
+      "query": "猫",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [
+          {
+            "expression": "猫",
+            "reading": "ネコ",
+            "frequencies": [
+              {
+                "dictionary": "fv2-freq-occurrence",
+                "values": [
+                  "9000"
+                ]
+              }
+            ]
+          },
+          {
+            "expression": "猫",
+            "reading": "ねこ",
+            "frequencies": [
+              {
+                "dictionary": "fv2-freq-occurrence",
+                "values": [
+                  "100"
+                ]
+              }
+            ]
+          }
+        ],
+        "order": "exact"
+      },
+      "divergence": {
+        "requirement": "DIC-003",
+        "note": "DIC-003: frequencyMode occurrence-based means higher is more frequent. Fushi ignores frequencyMode (it sorts descending only with an explicit lookup option), so it sorts these values lowest first.",
+        "fushi_expected": {
+          "entries": [
+            {
+              "expression": "猫",
+              "reading": "ねこ"
+            },
+            {
+              "expression": "猫",
+              "reading": "ネコ"
+            }
+          ],
+          "order": "exact"
+        }
+      },
+      "skip": false,
+      "note": "Fushi sorts a frequency dictionary highest first only through LookupOptions (frequency_dictionary, frequency_order = Descending). In Nikomiru the dictionary says so itself, with frequencyMode occurrence-based in its index.json (DIC-003)."
+    },
+    {
+      "id": "fv2-g-frequency-options",
+      "provenance": {
+        "file": "native/fushidicts/tests/format_v2_upstream_sync_test.cpp",
+        "test": "G: unknown frequency dictionary falls back silently, Disabled still returns results (G.unknown freq dict falls back silently, G.disabled order still returns results)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [],
+      "query": "",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [],
+        "order": "any"
+      },
+      "divergence": null,
+      "skip": true,
+      "note": "LookupOptions.frequency_dictionary and frequency_order (an unknown dictionary name, Disabled) have no counterpart: Nikomiru sorts by every enabled frequency dictionary in the user's order (LKP-034, DIC-031)."
+    },
+    {
+      "id": "dnu-titles",
+      "provenance": {
+        "file": "native/fushidicts/tests/dict_name_uaf_e2e_test.cpp",
+        "test": "main (ImportResult.title == index title; every glossary's dict_name is one of the three titles; each title appears)",
+        "commit": "ac8034e"
+      },
+      "kind": "lookup",
+      "language": "ja",
+      "dictionaries": [
+        "dnu-a",
+        "dnu-b",
+        "dnu-c"
+      ],
+      "query": "日本",
+      "options": {
+        "max_results": 10
+      },
+      "expected": {
+        "entries": [
+          {
+            "expression": "日本",
+            "reading": "日本",
+            "dictionaries": [
+              "dnu-a",
+              "dnu-b",
+              "dnu-c"
+            ],
+            "glossaries": [
+              [
+                "Japan-A"
+              ],
+              [
+                "Japan-B"
+              ],
+              [
+                "Japan-C"
+              ]
+            ]
+          }
+        ],
+        "order": "exact",
+        "import_titles": {
+          "dnu-a": "大修館 明鏡国語辞典（第二版）",
+          "dnu-b": "ロシア語＝日本語辞典 Большой",
+          "dnu-c": "café — Diccionario español"
+        }
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "Three dictionaries with long non-ASCII titles and the same headword (BUG-052): every title comes back from the import byte for byte, and every dictionary gives its glossary block."
+    },
+    {
+      "id": "ifb-kanji-malformed-hi",
+      "provenance": {
+        "file": "native/fushidicts/tests/import_failure_boundary_test.cpp",
+        "test": "5. one malformed kanji record no longer drops its whole bank (kanji_count == 3, 日 queryable)",
+        "commit": "ac8034e"
+      },
+      "kind": "kanji",
+      "dictionaries": [
+        "ifb-kanji"
+      ],
+      "query": "日",
+      "expected": {
+        "entries": [
+          {
+            "dictionary": "ifb-kanji",
+            "character": "日"
+          }
+        ],
+        "import_counts": {
+          "ifb-kanji": {
+            "terms": 0,
+            "freq": 0,
+            "pitch": 0,
+            "kanji": 3
+          }
+        }
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "The shape of the mozc Kanji Variants dictionary, with records of the wrong types around it: a number as the character and meanings that are not a list are skipped (BUG-2952); stats that are not an object are no stats. 日, 𠮟 and y are kept."
+    },
+    {
+      "id": "ifb-kanji-malformed-shitsu",
+      "provenance": {
+        "file": "native/fushidicts/tests/import_failure_boundary_test.cpp",
+        "test": "5. one malformed kanji record no longer drops its whole bank (4-byte 𠮟 queryable)",
+        "commit": "ac8034e"
+      },
+      "kind": "kanji",
+      "dictionaries": [
+        "ifb-kanji"
+      ],
+      "query": "𠮟",
+      "expected": {
+        "entries": [
+          {
+            "dictionary": "ifb-kanji",
+            "character": "𠮟"
+          }
+        ]
+      },
+      "divergence": null,
+      "skip": false,
+      "note": "A character outside the BMP (4 bytes in UTF-8)."
     }
   ]
 }

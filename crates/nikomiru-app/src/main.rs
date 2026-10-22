@@ -285,6 +285,9 @@ impl DictionaryService for NoDictionaries {
     fn set_collapse(&self, _id: &str, _collapse: nikomiru_library::Collapse) -> Result<(), String> {
         Err(self.0.clone())
     }
+    fn set_user_css(&self, _id: &str, _css: &str) -> Result<(), String> {
+        Err(self.0.clone())
+    }
 }
 
 fn run(

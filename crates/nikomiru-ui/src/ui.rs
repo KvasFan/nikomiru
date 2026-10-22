@@ -157,6 +157,11 @@ pub(crate) enum Command {
     },
     PopupFocus(usize),
     PopupHover(bool),
+    /// A popup's border was dragged to this size (POP-006).
+    PopupResized {
+        width: f64,
+        height: f64,
+    },
     PopupReplay,
     PopupGoto,
     /// A web link in a popup (POP-011): opened by the system, never by egui.
@@ -165,10 +170,14 @@ pub(crate) enum Command {
     DictConfirm(bool),
     DictCancel,
     DictMove(String, i32),
+    /// A dictionary dropped in a gap of its group (DIC-031).
+    DictMoveTo(String, usize),
     DictSetEnabled(String, bool),
     DictDelete(String),
     DictRename(String, String),
     DictSetCollapse(String, String),
+    /// The user's CSS of a dictionary, saved from its editor (DIC-035).
+    DictSetUserCss(String, String),
 }
 
 /// The interface: the session and its view.
@@ -501,6 +510,7 @@ impl Ui {
             } => s.popup_lookup(level, &text, anchor),
             Command::PopupFocus(level) => s.popup_focus(level),
             Command::PopupHover(inside) => s.popup_hover(inside),
+            Command::PopupResized { width, height } => s.popup_resized(width, height),
             Command::PopupReplay => s.popup_replay(),
             Command::PopupGoto => s.popup_goto(),
             Command::OpenExternal(url) => {
@@ -512,10 +522,12 @@ impl Ui {
             Command::DictConfirm(update) => s.dict_confirm(update),
             Command::DictCancel => s.dict_cancel(),
             Command::DictMove(id, delta) => s.dict_move(&id, delta),
+            Command::DictMoveTo(id, to) => s.dict_move_to(&id, to),
             Command::DictSetEnabled(id, on) => s.dict_set_enabled(&id, on),
             Command::DictDelete(id) => s.dict_delete(&id),
             Command::DictRename(id, name) => s.dict_rename(&id, &name),
             Command::DictSetCollapse(id, state) => s.dict_set_collapse(&id, &state),
+            Command::DictSetUserCss(id, css) => s.dict_set_user_css(&id, &css),
         }
     }
 

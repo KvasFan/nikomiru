@@ -183,17 +183,18 @@ M0 Foundations + spikes ──► M1 Player ──► M2 Subtitles ──► M4 
 **Status as of 2026-10-20**
 
 - Done: Yomitan import (safe, atomic, cancellable; T-DIC-001…003, 010…015, T-SEC-002), redb storage with term heads in the indexes and a Bloom filter per dictionary, deinflector on the `assets/transforms` tables, lookup (merging, sorting with dictionary priority, budget in groups, redirects, mixed orthography, Kansai exception, frequencies, pitch accent, kanji, LRU cache), registry in `library.redb` (order, enabled, update by revision, deletion, cleanup after a crash), the popup (spike S4, [ADR 0005](adr/0005-popup-qml.md)) with pause/resume, nesting, placement and highlighting, `--import-dictionary` on the command line.
-- Conformance: 168 text vectors and 233 lookup vectors from Fushi, all green.
+- Conformance: 168 text vectors, 243 lookup vectors and 39 import vectors from Fushi, green except 4 import vectors marked as known failures: Unicode Path fields that are malformed or that APPNOTE says to ignore (bit 11 set, unknown version, a record overrunning its block, an empty name), which the `zip` crate applies or refuses where Fushi keeps the raw name.
 - Measured: T-PERF-04 p95 1.7 ms / p99 2.2 ms, T-PERF-05 ≤ 4.4 s and 261 MiB per 300k-entry dictionary, T-PERF-06 p95 21 ms; with Jitendex and JMdict, click → popup 20–64 ms in a release build (ADR 0005).
 - Also done: the dictionaries page (import with progress and cancel, update offer, order, enable, rename, popup block state, delete), hover with Shift (POP-003), Tab/Shift+Tab/Alt+wheel between entries (POP-014; Enter and Ctrl+Enter wait for audio in M5 and cards in M4), replay and go to sentence (POP-015), `[lookup]` settings, library writes off the UI thread.
-- Open: selection inside glossaries for nested popups (POP-012; links already open them), the user's CSS per dictionary (DIC-035), the manual test with real dictionaries.
+- Done on 2026-10-20: selection inside glossaries opens a nested popup (POP-012), the popup resized by its border with its maximum size in `config.toml` (POP-006), the dictionaries page grouped by type with drag and drop between positions (DIC-030, DIC-031) and the user's CSS per dictionary edited on it (DIC-035), registry edits in one transaction, imports cancelled promptly and waited for at exit, T-SEC-001 on the real popup.
+- Open: the manual test with real dictionaries; the 4 Unicode Path known failures (they need a zip reader of our own, or a fix upstream).
 - UI on egui (D-13, 2026-10-20): decided after spike S5, which measured iced and egui against Qt Quick ([ADR 0006](adr/0006-toolkit-comparison.md)). Work track 5 done on 2026-10-20: window, video and control bar; subtitle overlay and list; popups from a typed view model with images decoded on the lookup thread; dictionaries page; file dialogs through the XDG portal; drag and drop on Wayland with the app's own data device (L6 with a real drag from another client); Qt, QML, cxx-qt and the C++ code removed. Still to check on the developer's session: fractional scale, Japanese IME, Orca, T-PERF-03 at 4K under load.
 
 **Exit criteria**
 
 - [ ] T-DIC-*, T-LKP-*, T-POP-* green, including **all** the conformance vectors ported from the fushidicts tests (TEST §5.1).
 - [ ] T-PERF-04, T-PERF-05, T-PERF-06 within the thresholds.
-- [ ] T-SEC-001 (dictionary content produces only allowlisted view-model nodes) and T-SEC-002 (malicious ZIPs) green.
+- [x] T-SEC-001 (dictionary content produces only allowlisted view-model nodes) and T-SEC-002 (malicious ZIPs) green.
 - [ ] UI on egui (D-13): the L6 suite green on the egui build; T-PERF-03 at 4K HEVC 10-bit under load, on Wayland and on X11 with EGL; on the developer's session: fractional scale, Japanese IME (fcitx5, ibus), AccessKit with Orca, 50 opens and closes ([ADR 0006](adr/0006-toolkit-comparison.md)); no Qt, cxx-qt or C++ left in the workspace (T-ARC-010, T-ARC-011).
 - [ ] Manual test with JMdict (English), JMnedict, a frequency dictionary (e.g. JPDB) and a pitch accent dictionary (e.g. NHK) imported by the user: the 50 words in the list of TEST §9.3 give the same headword in Nikomiru and in Fushi.
 

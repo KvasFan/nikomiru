@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use nikomiru_core::Cancel;
 use redb::{
     Database, MultimapTableDefinition, ReadOnlyMultimapTable, ReadOnlyTable, ReadableDatabase,
     TableDefinition, WriteTransaction,
@@ -397,6 +398,10 @@ fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StoreError> {
     Ok(postcard::to_allocvec(v)?)
 }
 
+/// Index rows written by [`StoreWriter::finish`] between two looks at the
+/// cancel flag.
+const ROWS_PER_CHECK: usize = 4096;
+
 /// Writes a new dictionary file in one transaction (DIC-013: the import
 /// commits only at the end, and the folder is renamed only after that).
 pub struct StoreWriter {
@@ -539,19 +544,32 @@ impl StoreWriter {
     }
 
     /// Writes the indexes (sorted by key, as fast as redb inserts) and the
-    /// info, commits and compacts.
+    /// info, commits and compacts. With a JMdict-sized dictionary this takes
+    /// seconds, so `cancel` is looked at every [`ROWS_PER_CHECK`] rows and
+    /// before the commit and the compaction (DIC-010): `Ok(None)` when it
+    /// stopped, and the file is then of no use.
     pub fn finish(
         mut self,
         index: Index,
         kinds: Kinds,
         styles: String,
-    ) -> Result<DictInfo, StoreError> {
+        cancel: &Cancel,
+    ) -> Result<Option<DictInfo>, StoreError> {
+        let stopped = |n: usize| n.is_multiple_of(ROWS_PER_CHECK) && cancel.is_cancelled();
         let txn = self
             .txn
             .take()
             .ok_or_else(|| StoreError::Glossary("writer already finished".into()))?;
         let mut filter = Bloom::with_capacity(self.by_expression.len() + self.by_reading.len());
-        for (key, _) in self.by_expression.iter().chain(&self.by_reading) {
+        for (n, (key, _)) in self
+            .by_expression
+            .iter()
+            .chain(&self.by_reading)
+            .enumerate()
+        {
+            if stopped(n) {
+                return Ok(None);
+            }
             filter.insert(key);
         }
         for (def, mut pairs) in [
@@ -560,7 +578,10 @@ impl StoreWriter {
         ] {
             pairs.sort();
             let mut table = db!(txn.open_multimap_table(def))?;
-            for (key, head) in &pairs {
+            for (n, (key, head)) in pairs.iter().enumerate() {
+                if stopped(n) {
+                    return Ok(None);
+                }
                 db!(table.insert(key.as_str(), head.as_slice()))?;
             }
         }
@@ -583,11 +604,18 @@ impl StoreWriter {
             db!(table.insert("info", encode(&info)?.as_slice()))?;
             db!(table.insert("filter", filter.to_bytes().as_slice()))?;
         }
+        // the commit and the compaction cannot be interrupted
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
         db!(txn.commit())?;
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
         // the file shrinks by ~40% (ADR 0002)
         let mut db = self.db;
         db!(db.compact())?;
-        Ok(info)
+        Ok(Some(info))
     }
 }
 
@@ -650,7 +678,13 @@ mod tests {
         .unwrap();
         w.add_media("\\img/a.png", &[1, 2, 3]).unwrap();
         let info = w
-            .finish(index(), Kinds::default(), "a { color: red }".into())
+            .finish(
+                index(),
+                Kinds::default(),
+                "a { color: red }".into(),
+                &Cancel::new(),
+            )
+            .unwrap()
             .unwrap();
         assert_eq!(info.counts.terms, 3);
 
@@ -666,5 +700,21 @@ mod tests {
         assert_eq!(s.term_meta("食べる").unwrap().len(), 1);
         assert_eq!(s.media("img/a.png").unwrap(), Some(vec![1, 2, 3]));
         assert!(s.kanji("食").unwrap().is_none());
+    }
+
+    // T-DIC-010
+    #[test]
+    fn a_cancelled_finish_commits_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dict.redb");
+        let mut w = StoreWriter::create(&path).unwrap();
+        w.add_terms(vec![term("食べる", "たべる")]).unwrap();
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let finished = w
+            .finish(index(), Kinds::default(), String::new(), &cancel)
+            .unwrap();
+        assert_eq!(finished, None);
+        assert!(RedbStore::open(&path).is_err(), "nothing was committed");
     }
 }

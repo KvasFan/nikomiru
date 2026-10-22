@@ -2,12 +2,14 @@
 
 //! The dictionary service of the session: lookups run on a worker thread,
 //! with the dictionaries of the registry (DIC-021), and come back as popup
-//! content (POP-007); imports run on their own thread; the page's other
-//! operations are quick registry writes.
+//! content (POP-007); imports run on threads of their own, which the service
+//! cancels and waits for when it goes; the page's other operations are quick
+//! registry writes.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::JoinHandle;
 
 use nikomiru_core::Cancel;
 use nikomiru_dict::import::Progress;
@@ -22,22 +24,38 @@ use nikomiru_ui::i18n::Translator;
 use nikomiru_ui::popup::Reply;
 use nikomiru_ui::popup_view::{self, Collapse, DictView};
 
-/// The dictionaries of the registry: lookups on a worker thread, in order.
+/// The dictionaries of the registry: lookups on a worker thread, in order;
+/// imports on threads of their own.
 #[derive(Debug)]
 pub struct Dictionaries {
     manager: Arc<DictionaryManager>,
     translator: Translator,
     jobs: Option<mpsc::Sender<(String, Done<Reply>)>>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    worker: Option<JoinHandle<()>>,
+    /// The imports that may still run, with their cancels.
+    imports: Mutex<Vec<(Cancel, JoinHandle<()>)>>,
 }
 
 impl Drop for Dictionaries {
-    /// The worker holds the library (through the manager): it must end
-    /// before the process does, or the library is left to be repaired.
+    /// The workers hold the library (through the manager): they must end
+    /// before the process does, or the library is left to be repaired
+    /// (REL-001). A running import is cancelled first, so the exit does not
+    /// wait for it to finish (DIC-010).
     fn drop(&mut self) {
+        let imports = std::mem::take(
+            self.imports
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for (cancel, _) in &imports {
+            cancel.cancel();
+        }
         drop(self.jobs.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+        for (_, import) in imports {
+            let _ = import.join();
         }
     }
 }
@@ -75,6 +93,7 @@ impl Dictionaries {
             translator,
             jobs: Some(jobs),
             worker,
+            imports: Mutex::new(Vec::new()),
         }
     }
 
@@ -115,8 +134,9 @@ impl DictionaryService for Dictionaries {
     ) {
         let manager = Arc::clone(&self.manager);
         let translator = self.translator.clone();
+        let running = cancel.clone();
         // the page waits for `done`: it must come even if the thread cannot start
-        let done = Arc::new(std::sync::Mutex::new(Some(done)));
+        let done = Arc::new(Mutex::new(Some(done)));
         let finish = Arc::clone(&done);
         let spawned = std::thread::Builder::new()
             .name("nikomiru-import".into())
@@ -132,10 +152,17 @@ impl DictionaryService for Dictionaries {
                     done(result);
                 }
             });
-        if let Err(e) = spawned {
-            tracing::error!("cannot start the import thread: {e}");
-            if let Some(done) = done.lock().ok().and_then(|mut d| d.take()) {
-                done(Err(e.to_string()));
+        match spawned {
+            Ok(thread) => {
+                let mut imports = self.imports.lock().unwrap_or_else(PoisonError::into_inner);
+                imports.retain(|(_, thread)| !thread.is_finished());
+                imports.push((running, thread));
+            }
+            Err(e) => {
+                tracing::error!("cannot start the import thread: {e}");
+                if let Some(done) = done.lock().ok().and_then(|mut d| d.take()) {
+                    done(Err(e.to_string()));
+                }
             }
         }
     }
@@ -158,6 +185,10 @@ impl DictionaryService for Dictionaries {
 
     fn set_collapse(&self, id: &str, collapse: RecordCollapse) -> Result<(), String> {
         self.tr(self.manager.set_collapse(id, collapse))
+    }
+
+    fn set_user_css(&self, id: &str, css: &str) -> Result<(), String> {
+        self.tr(self.manager.set_user_css(id, css))
     }
 }
 

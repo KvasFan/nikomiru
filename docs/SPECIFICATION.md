@@ -486,7 +486,7 @@ Default player bindings, from Fushi `shortcut_defaults.dart`:
 |---|---|---|
 | DIC-001 | MUST import **Yomitan/Yomichan** dictionaries (zip with `index.json`, format 3; format 1/2 is SHOULD): `term_bank_*`, `term_meta_bank_*` (`freq`, `pitch`, `ipa`), `kanji_bank_*`, `kanji_meta_bank_*` (`freq`), `tag_bank_*`, `styles.css`, media files | `importer.cpp` |
 | DIC-002 | Unlike Fushi, MUST import the `tag_bank_*` files (category, order, notes, score) and use them for chips and for sorting. MUST keep `sequence` and `score` | Fushi gap |
-| DIC-003 | Frequencies: values as a number, `{value, displayValue?}` and `{reading, frequency}`. Unlike Fushi, MUST also accept string values (reading the leading integer) and respect `frequencyMode` from `index.json` (`rank-based` default; `occurrence-based` = higher is better) | Fushi gap |
+| DIC-003 | Frequencies: values as a number, `{value, displayValue?}` and `{reading, frequency}` (also written `{reading, value}`, which Fushi reads too). Unlike Fushi, MUST also accept string values (reading the leading integer) and respect `frequencyMode` from `index.json` (`rank-based` default; `occurrence-based` = higher is better) | Fushi gap |
 | DIC-004 | MDict, StarDict, DSL, Migaku: post-1.0 | |
 
 #### 6.5.2 Import pipeline
@@ -494,7 +494,7 @@ Default player bindings, from Fushi `shortcut_defaults.dart`:
 | ID | Requirement |
 |---|---|
 | DIC-010 | Import runs in a background task with progress (files and entries) and can be cancelled; the UI stays responsive. |
-| DIC-011 | ZIP safety: reject absolute paths, `..` components, symbolic links, entries > 512 MiB uncompressed, compression ratio > 200:1 on entries > 1 MiB, total uncompressed > 8 GiB. Strip a single wrapper folder and ignore `__MACOSX` and `.DS_Store` (BUG-2053). Support the Info-ZIP extra field for Unicode paths (BUG-3277) and ZIP64. |
+| DIC-011 | ZIP safety: reject absolute paths, `..` components, symbolic links, entries > 512 MiB uncompressed, compression ratio > 200:1 on entries > 1 MiB, total uncompressed > 8 GiB. Strip the wrapper folder that holds the whole archive, and the one nested in it, until `index.json` is at the root; ignore `__MACOSX` and `.DS_Store` (BUG-2053). Support the Info-ZIP extra field for Unicode paths (BUG-3277) and ZIP64. |
 | DIC-012 | Limits: 10 M entries per dictionary, glossary ≤ 10 MiB per entry. If a limit is exceeded, the import fails cleanly. |
 | DIC-013 | Import writes to `dicts/<id>.importing/` and, only on complete success, does an atomic rename to `dicts/<id>/` and registers the dictionary. After an error or a crash nothing partial remains; leftover `.importing` folders are deleted at startup. |
 | DIC-014 | Disk full: specific message (`ERR_STORAGE_FULL`), with cleanup of partial files. |
@@ -522,12 +522,12 @@ Default player bindings, from Fushi `shortcut_defaults.dart`:
 
 | ID | Requirement |
 |---|---|
-| DIC-030 | List of dictionaries by type (terms, frequencies, pitch accent, kanji): title, revision, import date, number of entries, size. |
-| DIC-031 | Reordering by drag and drop: the order decides the position of the glossaries in the popup and the priority of the frequency dictionaries. |
+| DIC-030 | List of dictionaries by type (terms, kanji, frequencies, pitch accent): title, revision, declared language, import date, number of entries, size. A dictionary with several types (DIC-015) has its row under the first of them in this order; under each of its other types a reference shows where it ranks. |
+| DIC-031 | Reordering by drag and drop: the order decides the position of the glossaries in the popup and the priority of the frequency dictionaries. The order is one for every type: a dictionary dropped in its type's list goes just above the row under the drop marker (or just below the list's last row), and every other dictionary keeps its place. ▲/▼ buttons do the same one row at a time, for the keyboard and screen readers. |
 | DIC-032 | Every dictionary can be enabled or disabled. A disabled one is **not queried** (Fushi BUG-3454/2997: exclude it before truncation, not at render time). |
 | DIC-033 | Deletion with confirmation; renaming for display only (`display_name`). |
 | DIC-034 | Collapse/expand state of the dictionary in the popup: `expanded` / `collapsed` / `automatic` (only the first N are expanded). |
-| DIC-035 | Per-dictionary styling: a safe subset of CSS properties taken from the dictionary's `styles.css` and from the user's CSS (color, font size, weight and style, margins, padding, borders, background), applied only to that dictionary's popup content. The subset is the one of spike S4 ([ADR 0005](adr/0005-popup-qml.md)). |
+| DIC-035 | Per-dictionary styling: a safe subset of CSS properties taken from the dictionary's `styles.css` and from the user's CSS (color, font size, weight and style, margins, padding, borders, background), applied only to that dictionary's popup content. The subset is the one of spike S4 ([ADR 0005](adr/0005-popup-qml.md)). The user's CSS of a term dictionary is written on the dictionaries page, in a code field with Save, Revert and Clear, and applied after its `styles.css` through the same subset; the page says what the subset keeps of it: the rules applied, the properties left out and the rules ignored. |
 
 ### 6.6 Lookup (LKP)
 
@@ -609,7 +609,7 @@ Imported tag banks (DIC-002) · string frequencies and `frequencyMode` (DIC-003)
 | POP-003 | Hover with Shift (movement threshold 8 px; not repeated on the same character). Option `lookup.hover_without_modifier` (default no). Hover lookup pauses like a click. If the pointer leaves the subtitle and the popup for 320 ms, the popup closes and playback resumes (`lookup.resume_on_leave`, default yes). | |
 | POP-004 | When all popups are closed, playback resumes **only** if the lookup paused it (BUG-072). | |
 | POP-005 | With a popup open, a click on another character of the subtitle or the list replaces the entry and stays paused. | |
-| POP-006 | Position: above the subtitle if there is room, otherwise below. It never covers the looked-up word and shrinks to fit in the window. Configurable maximum size; resizable by dragging the border. | `dictionary_popup_layer.dart` |
+| POP-006 | Position: above the subtitle if there is room, otherwise below. It never covers the looked-up word and shrinks to fit in the window. Configurable maximum size (`[popup]`, §9; 560 × 500 points by default): a popup is that wide and as tall as its content up to that height. Resizable by dragging the border: the edge away from the word, the side edges and the corners between them (the edge next to the word has no grip: moving it would cover the word). The dragged edge follows the pointer while the popup keeps its side of the word, stays centred on it and inside the window; the size it gets, within 240 × 120 and 4096 × 4096 points, holds for the next popups until the app closes. `config.toml` is not written: the app has no writer yet that keeps a hand-edited file and its comments (SET-001). | `dictionary_popup_layer.dart` |
 | POP-007 | Header of each entry: headword with furigana (LKP-050), ♪ audio button (AUD), create-card button (+ / ✓ / ✓↩, ANK-030), deinflection trace chips with a description on hover, frequency row, pitch accent row, term tag chips. | `popup.js` |
 | POP-008 | One collapsible block per dictionary, with the collapsed state according to DIC-034. Definition tags appear as chips: numeric tags are hidden, a part-of-speech tag repeated on consecutive senses is omitted. | |
 | POP-009 | Yomitan **structured content**: converted into the popup's view model (typed blocks and runs, drawn by egui) from an allowlist of tags (`br ruby rt rp table thead tbody tfoot tr td th span div ol ul li details summary img a`). The style hooks of each tag (Yomitan's `gloss-sc-<tag>` class), the `data-sc-*` values, `lang` and an allowlist of `style` properties feed the styling subset of DIC-035. **No raw HTML** from Yomitan dictionaries and no scripts. Tables in a scrollable container. | `renderStructuredContent` |
@@ -804,6 +804,10 @@ obscure = "none"            # "none" | "blur" | "hidden"
 max_results = 10
 hover_without_modifier = false
 resume_on_leave = true
+
+[popup]                     # the largest dictionary popup, in points (POP-006)
+max_width = 560             # 240–4096; never wider than the window
+max_height = 500            # 120–4096; a popup is as tall as its content, up to this
 
 [anki]
 url = "http://127.0.0.1:8765"
